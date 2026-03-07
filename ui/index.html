@@ -199,6 +199,7 @@
           <div class="status-grid">
             <div>Vision: <span id="vision-status" class="status-pill">unknown</span></div>
             <div>Tracking: <span id="tracking-status" class="status-pill">unknown</span></div>
+            <div>Control Mode: <span id="control-mode" class="status-pill">inactive</span></div>
             <div>Last Event: <span id="last-event" class="status-pill">none</span></div>
             <div>Current Pose: <span id="pose-hint" class="status-pill">none</span></div>
           </div>
@@ -233,9 +234,13 @@
             <div class="field"><label>Camera FPS</label><input id="set-camera-fps" type="number" step="1" /></div>
             <div class="field"><label>Camera Width</label><input id="set-camera-width" type="number" step="1" /></div>
             <div class="field"><label>Camera Height</label><input id="set-camera-height" type="number" step="1" /></div>
+            <div class="field"><label>Pointer Range</label><input id="set-pointer-range" type="number" step="0.05" min="0.5" max="3.0" /></div>
             <div class="field"><label>Move Gain</label><input id="set-move-gain" type="number" step="0.1" /></div>
+            <div class="field"><label>Move Accel</label><input id="set-move-accel" type="number" step="0.1" /></div>
+            <div class="field"><label>Move Max Delta</label><input id="set-move-max-delta" type="number" step="0.001" /></div>
             <div class="field"><label>Deadzone</label><input id="set-deadzone" type="number" step="0.001" /></div>
             <div class="field"><label>Hold to Control (ms)</label><input id="set-hold-ms" type="number" step="1" /></div>
+            <div class="field"><label>Clutch Enter (ms)</label><input id="set-clutch-enter-ms" type="number" step="1" /></div>
             <div class="field"><label>Pinch Threshold</label><input id="set-pinch" type="number" step="0.001" /></div>
             <div class="field"><label>Right Pinch Threshold</label><input id="set-right-pinch" type="number" step="0.001" /></div>
             <div class="field"><label>Click Cooldown (ms)</label><input id="set-click-cooldown" type="number" step="1" /></div>
@@ -266,6 +271,7 @@
       const frameMeta = document.getElementById("frame-meta");
       const visionStatusEl = document.getElementById("vision-status");
       const trackingStatusEl = document.getElementById("tracking-status");
+      const controlModeEl = document.getElementById("control-mode");
       const lastEventEl = document.getElementById("last-event");
       const poseHintEl = document.getElementById("pose-hint");
       const hintMeta = document.getElementById("hint-meta");
@@ -285,29 +291,43 @@
 
       const calibrationSteps = [
         {
-          id: "open_palm_start",
-          title: "Show open palm for 2 seconds",
-          instruction: "Keep full palm visible to arm control.",
-          holdMs: 2000,
+          id: "start_control",
+          title: "Start control with open palm",
+          instruction: "Hold full open palm (all fingers visible) until control mode becomes active.",
+          holdMs: 1200,
         },
         {
-          id: "move_two_finger",
-          title: "Use two-finger movement for 6 seconds",
-          instruction: "Move pointer with index+middle pose.",
-          holdMs: 6000,
-          minMove: 0.08,
+          id: "move_phase_1",
+          title: "Move with two fingers",
+          instruction: "Switch to two-finger pose and move the cursor.",
+          holdMs: 2400,
+          minMove: 0.05,
+        },
+        {
+          id: "clutch_pause",
+          title: "Pause with open palm (clutch)",
+          instruction: "Show full open palm (all fingers up) to enter clutch mode and freeze pointer.",
+          holdMs: 1000,
+        },
+        {
+          id: "move_phase_2",
+          title: "Resume move after clutch",
+          instruction: "Return to two-finger pose and move again.",
+          holdMs: 2200,
+          minMove: 0.04,
         },
         {
           id: "click_test",
           title: "Trigger one left click and one right click",
-          instruction: "Do thumb-index pinch, then thumb-middle pinch.",
+          instruction:
+            "In clutch (full palm) mode, do thumb-index pinch (middle/ring/pinky up) then thumb-middle pinch (index/ring/pinky up).",
           holdMs: 0,
         },
         {
           id: "closed_fist_stop",
-          title: "Show closed fist for 1 second",
-          instruction: "Closed fist stops control and completes calibration.",
-          holdMs: 1000,
+          title: "Stop control with closed fist",
+          instruction: "Hold closed fist until control turns off.",
+          holdMs: 700,
         },
       ];
 
@@ -324,6 +344,8 @@
         pinchIndexSamples: [],
         pinchMiddleSamples: [],
         jitterSamples: [],
+        clutchOnCount: 0,
+        clutchOffCount: 0,
         controlOffCount: 0,
         prevIndexPoint: null,
         prevPinchIndex: false,
@@ -429,6 +451,8 @@
         calibration.pinchIndexSamples = [];
         calibration.pinchMiddleSamples = [];
         calibration.jitterSamples = [];
+        calibration.clutchOnCount = 0;
+        calibration.clutchOffCount = 0;
         calibration.controlOffCount = 0;
         calibration.prevIndexPoint = null;
         calibration.prevPinchIndex = false;
@@ -442,7 +466,7 @@
         calibration.active = true;
         renderCalibrationSteps();
         setCalibrationStateText();
-        calibrationSummaryEl.textContent = "Collecting movement, confidence, and pinch metrics...";
+        calibrationSummaryEl.textContent = "Collecting move/clutch transitions, confidence, and pinch metrics...";
         push("guided calibration started");
       };
 
@@ -481,7 +505,7 @@
         const medMove = median(calibration.movementSamples);
         const medPinchL = median(calibration.pinchIndexSamples);
         const medPinchR = median(calibration.pinchMiddleSamples);
-        return `avg_conf=${avgConf.toFixed(2)} med_move=${medMove.toFixed(4)} med_pinch(index/middle)=${medPinchL.toFixed(3)}/${medPinchR.toFixed(3)} control_off_events=${calibration.controlOffCount}`;
+        return `avg_conf=${avgConf.toFixed(2)} med_move=${medMove.toFixed(4)} med_pinch(index/middle)=${medPinchL.toFixed(3)}/${medPinchR.toFixed(3)} clutch_on/off=${calibration.clutchOnCount}/${calibration.clutchOffCount} control_off_events=${calibration.controlOffCount}`;
       };
 
       const buildCalibrationRequestFromData = () => {
@@ -492,11 +516,29 @@
         const medPinchR = median(calibration.pinchMiddleSamples);
         const jitter = mean(calibration.jitterSamples);
 
+        let pointerRange = 1.0;
         let moveGain = 5.5;
-        if (medMove < 0.0035) moveGain = 7.0;
-        else if (medMove < 0.0055) moveGain = 6.2;
-        else if (medMove < 0.0085) moveGain = 5.4;
-        else moveGain = 4.8;
+        let moveAccel = 8.0;
+        if (medMove < 0.0035) {
+          pointerRange = 1.8;
+          moveGain = 7.1;
+        } else if (medMove < 0.0055) {
+          pointerRange = 1.45;
+          moveGain = 6.3;
+        } else if (medMove < 0.0085) {
+          pointerRange = 1.2;
+          moveGain = 5.5;
+        } else if (medMove > 0.016) {
+          pointerRange = 0.85;
+          moveGain = 4.7;
+        } else {
+          pointerRange = 1.0;
+          moveGain = 5.0;
+        }
+        if (medMove < 0.0035) moveAccel = 10.5;
+        else if (medMove < 0.0055) moveAccel = 9.2;
+        else if (medMove < 0.0085) moveAccel = 8.0;
+        else moveAccel = 6.8;
 
         const deadzone = clamp(jitter * 3.2, 0.006, 0.024);
         const confLock = clamp(avgConf > 0 ? avgConf + 0.08 : 0.65, 0.50, 0.85);
@@ -506,9 +548,13 @@
 
         const request = {
           profile,
+          pointer_range: pointerRange,
           move_gain: moveGain,
+          move_accel: moveAccel,
+          move_max_delta: medMove < 0.004 ? 0.095 : 0.085,
           deadzone: deadzone,
           hold_to_control_ms: calibration.controlOffCount > 2 ? 90 : 70,
+          clutch_enter_ms: calibration.controlOffCount > 2 ? 90 : 70,
           click_cooldown_ms: profile === "responsive" ? 140 : 170,
           confidence_lock: confLock,
           confidence_unlock: confUnlock,
@@ -528,17 +574,20 @@
         const now = Date.now();
 
         let completed = false;
-        if (step.id === "open_palm_start") {
-          if (hint.open_palm_pose) {
+        if (step.id === "start_control") {
+          if (hint.control_mode && hint.control_mode !== "inactive") {
             calibration.conditionSinceMs ??= now;
             calibration.stepProgress = clamp((now - calibration.conditionSinceMs) / step.holdMs, 0, 1);
             completed = calibration.stepProgress >= 1;
+          } else if (hint.open_palm_pose) {
+            calibration.conditionSinceMs ??= now;
+            calibration.stepProgress = clamp((now - calibration.conditionSinceMs) / step.holdMs, 0, 0.92);
           } else {
             calibration.conditionSinceMs = null;
             calibration.stepProgress = 0;
           }
-        } else if (step.id === "move_two_finger") {
-          if (hint.two_finger_pose) {
+        } else if (step.id === "move_phase_1" || step.id === "move_phase_2") {
+          if (hint.control_mode === "move" && hint.two_finger_pose) {
             calibration.conditionSinceMs ??= now;
             const holdProgress = clamp((now - calibration.conditionSinceMs) / step.holdMs, 0, 1);
             const motionProgress = clamp(calibration.stepMoveDistance / step.minMove, 0, 1);
@@ -548,15 +597,29 @@
             calibration.conditionSinceMs = null;
             calibration.stepProgress = 0;
           }
+        } else if (step.id === "clutch_pause") {
+          if (hint.control_mode === "clutch") {
+            calibration.conditionSinceMs ??= now;
+            calibration.stepProgress = clamp((now - calibration.conditionSinceMs) / step.holdMs, 0, 1);
+            completed = calibration.stepProgress >= 1;
+          } else if (hint.open_palm_pose) {
+            calibration.conditionSinceMs ??= now;
+            calibration.stepProgress = clamp((now - calibration.conditionSinceMs) / step.holdMs, 0, 0.85);
+          } else {
+            calibration.conditionSinceMs = null;
+            calibration.stepProgress = 0;
+          }
         } else if (step.id === "click_test") {
           const score = calibration.stepClicks.left + calibration.stepClicks.right;
           calibration.stepProgress = clamp(score / 2, 0, 1);
           completed = calibration.stepClicks.left >= 1 && calibration.stepClicks.right >= 1;
         } else if (step.id === "closed_fist_stop") {
-          if (hint.closed_palm_pose) {
+          if (calibration.controlOffCount > 0) {
+            calibration.stepProgress = 1;
+            completed = true;
+          } else if (hint.closed_palm_pose) {
             calibration.conditionSinceMs ??= now;
             calibration.stepProgress = clamp((now - calibration.conditionSinceMs) / step.holdMs, 0, 1);
-            completed = calibration.stepProgress >= 1;
           } else {
             calibration.conditionSinceMs = null;
             calibration.stepProgress = 0;
@@ -575,9 +638,13 @@
         document.getElementById("set-camera-fps").value = s.camera_fps;
         document.getElementById("set-camera-width").value = s.camera_width;
         document.getElementById("set-camera-height").value = s.camera_height;
+        document.getElementById("set-pointer-range").value = s.pointer_range ?? 1.0;
         document.getElementById("set-move-gain").value = s.move_gain;
+        document.getElementById("set-move-accel").value = s.move_accel ?? 8.0;
+        document.getElementById("set-move-max-delta").value = s.move_max_delta ?? 0.08;
         document.getElementById("set-deadzone").value = s.deadzone;
         document.getElementById("set-hold-ms").value = s.hold_to_control_ms;
+        document.getElementById("set-clutch-enter-ms").value = s.clutch_enter_ms ?? 70;
         document.getElementById("set-pinch").value = s.pinch_threshold;
         document.getElementById("set-right-pinch").value = s.right_pinch_threshold;
         document.getElementById("set-click-cooldown").value = s.click_cooldown_ms;
@@ -608,9 +675,13 @@
           camera_fps: Math.max(1, Math.round(getNumber("set-camera-fps", base.camera_fps ?? 30))),
           camera_width: Math.max(160, Math.round(getNumber("set-camera-width", base.camera_width ?? 1280))),
           camera_height: Math.max(120, Math.round(getNumber("set-camera-height", base.camera_height ?? 720))),
+          pointer_range: clamp(getNumber("set-pointer-range", base.pointer_range ?? 1.0), 0.5, 3.0),
           move_gain: getNumber("set-move-gain", base.move_gain ?? 5.5),
+          move_accel: getNumber("set-move-accel", base.move_accel ?? 8.0),
+          move_max_delta: getNumber("set-move-max-delta", base.move_max_delta ?? 0.08),
           deadzone: getNumber("set-deadzone", base.deadzone ?? 0.012),
           hold_to_control_ms: Math.max(20, Math.round(getNumber("set-hold-ms", base.hold_to_control_ms ?? 70))),
+          clutch_enter_ms: Math.max(20, Math.round(getNumber("set-clutch-enter-ms", base.clutch_enter_ms ?? 70))),
           pinch_threshold: getNumber("set-pinch", base.pinch_threshold ?? 0.035),
           right_pinch_threshold: getNumber("set-right-pinch", base.right_pinch_threshold ?? 0.04),
           click_cooldown_ms: Math.max(60, Math.round(getNumber("set-click-cooldown", base.click_cooldown_ms ?? 170))),
@@ -686,8 +757,10 @@
         const p = event.payload || {};
         lastEventEl.textContent = p.type || "gesture";
         if (calibration.active) {
-          if (p.type === "left_click") calibration.stepClicks.left += 1;
-          if (p.type === "right_click") calibration.stepClicks.right += 1;
+          if (p.type === "left_click" && activeStep()?.id === "click_test") calibration.stepClicks.left += 1;
+          if (p.type === "right_click" && activeStep()?.id === "click_test") calibration.stepClicks.right += 1;
+          if (p.type === "clutch_on") calibration.clutchOnCount += 1;
+          if (p.type === "clutch_off") calibration.clutchOffCount += 1;
           if (p.type === "control_off") calibration.controlOffCount += 1;
           evaluateCalibrationStep(latestHint);
         }
@@ -698,9 +771,10 @@
         const p = event.payload || {};
         latestHint = p;
         poseHintEl.textContent = p.label || "unknown";
+        controlModeEl.textContent = p.control_mode || (p.move_active ? "move" : "inactive");
         const holdPercent = Math.round((p.hold_progress || 0) * 100);
         hintMeta.textContent =
-          `hold=${holdPercent}% move=${!!p.move_active} open=${!!p.open_palm_pose} two_finger=${!!p.two_finger_pose} closed=${!!p.closed_palm_pose} down=${!!p.hand_down_pose} ` +
+          `mode=${p.control_mode || "unknown"} hold=${holdPercent}% move=${!!p.move_active} open=${!!p.open_palm_pose} two_finger=${!!p.two_finger_pose} closed=${!!p.closed_palm_pose} down=${!!p.hand_down_pose} ` +
           `pinch(index/middle)=${!!p.pinch_index}/${!!p.pinch_middle} dist(t-i/t-m)=${(p.thumb_index_distance || 0).toFixed(3)}/${(p.thumb_middle_distance || 0).toFixed(3)} ` +
           `thr=${(p.pinch_index_threshold || 0).toFixed(3)}/${(p.pinch_middle_threshold || 0).toFixed(3)}`;
         if (calibration.active) {
@@ -710,7 +784,7 @@
           if (p.pinch_middle && p.thumb_middle_distance) {
             calibration.pinchMiddleSamples.push(p.thumb_middle_distance);
           }
-          if (activeStep()?.id === "click_test") {
+          if (activeStep()?.id === "click_test" && p.control_mode === "clutch") {
             if (p.pinch_index && !calibration.prevPinchIndex) {
               calibration.stepClicks.left += 1;
             }
@@ -749,7 +823,7 @@
           const dx = idx.x - calibration.prevIndexPoint.x;
           const dy = idx.y - calibration.prevIndexPoint.y;
           const dist = Math.hypot(dx, dy);
-          if (latestHint.two_finger_pose) {
+          if (latestHint.control_mode === "move" && latestHint.two_finger_pose) {
             calibration.stepMoveDistance += dist;
             calibration.movementSamples.push(dist);
           }

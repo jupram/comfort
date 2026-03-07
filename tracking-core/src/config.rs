@@ -52,9 +52,13 @@ pub struct AppSettings {
     pub input_injection_enabled: bool,
     pub safe_mode: bool,
     pub allow_safe_mode_movement: bool,
+    pub pointer_range: f32,
     pub move_gain: f32,
+    pub move_accel: f32,
+    pub move_max_delta: f32,
     pub deadzone: f32,
     pub hold_to_control_ms: u64,
+    pub clutch_enter_ms: u64,
     pub pinch_threshold: f32,
     pub right_pinch_threshold: f32,
     pub click_cooldown_ms: u64,
@@ -86,9 +90,13 @@ impl Default for AppSettings {
             input_injection_enabled: false,
             safe_mode: true,
             allow_safe_mode_movement: false,
+            pointer_range: 1.0,
             move_gain: 5.0,
+            move_accel: 8.0,
+            move_max_delta: 0.08,
             deadzone: 0.015,
             hold_to_control_ms: 70,
+            clutch_enter_ms: 70,
             pinch_threshold: 0.035,
             right_pinch_threshold: 0.040,
             click_cooldown_ms: 160,
@@ -113,6 +121,11 @@ impl AppSettings {
         if self.confidence_unlock >= self.confidence_lock {
             self.confidence_unlock = (self.confidence_lock - MIN_CONF_GAP).max(0.20);
         }
+
+        self.move_accel = self.move_accel.clamp(0.0, 30.0);
+        self.move_max_delta = self.move_max_delta.clamp(0.01, 0.25);
+        self.clutch_enter_ms = self.clutch_enter_ms.clamp(20, 300);
+        self.pointer_range = self.pointer_range.clamp(0.5, 3.0);
     }
 
     pub fn normalized(mut self) -> Self {
@@ -124,9 +137,13 @@ impl AppSettings {
         self.calibration_profile = profile;
         match profile {
             CalibrationProfile::Comfort => {
+                self.pointer_range = 0.95;
                 self.move_gain = 4.6;
+                self.move_accel = 6.4;
+                self.move_max_delta = 0.075;
                 self.deadzone = 0.018;
                 self.hold_to_control_ms = 85;
+                self.clutch_enter_ms = 80;
                 self.pinch_threshold = 0.038;
                 self.right_pinch_threshold = 0.043;
                 self.click_cooldown_ms = 190;
@@ -134,9 +151,13 @@ impl AppSettings {
                 self.confidence_unlock = 0.48;
             }
             CalibrationProfile::Balanced => {
+                self.pointer_range = 1.0;
                 self.move_gain = 5.5;
+                self.move_accel = 8.0;
+                self.move_max_delta = 0.085;
                 self.deadzone = 0.012;
                 self.hold_to_control_ms = 70;
+                self.clutch_enter_ms = 70;
                 self.pinch_threshold = 0.035;
                 self.right_pinch_threshold = 0.040;
                 self.click_cooldown_ms = 170;
@@ -144,9 +165,13 @@ impl AppSettings {
                 self.confidence_unlock = 0.45;
             }
             CalibrationProfile::Responsive => {
+                self.pointer_range = 1.15;
                 self.move_gain = 6.8;
+                self.move_accel = 10.5;
+                self.move_max_delta = 0.095;
                 self.deadzone = 0.008;
                 self.hold_to_control_ms = 55;
+                self.clutch_enter_ms = 60;
                 self.pinch_threshold = 0.032;
                 self.right_pinch_threshold = 0.036;
                 self.click_cooldown_ms = 140;

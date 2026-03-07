@@ -1,9 +1,10 @@
 use crate::config::AppSettings;
-use crate::types::{ControlIntent, Landmark};
+use crate::types::{ControlIntent, ControlMode, Landmark};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct GestureHintState {
     pub label: String,
+    pub control_mode: ControlMode,
     pub move_active: bool,
     pub two_finger_pose: bool,
     pub open_palm_pose: bool,
@@ -28,6 +29,7 @@ impl GestureHintState {
     fn no_hand() -> Self {
         Self {
             label: "no_hand".to_string(),
+            control_mode: ControlMode::Inactive,
             move_active: false,
             two_finger_pose: false,
             open_palm_pose: false,
@@ -62,6 +64,8 @@ struct FrameSignals {
     hand_down_pose: bool,
     pinch_index: bool,
     pinch_middle: bool,
+    left_click_pose: bool,
+    right_click_pose: bool,
     pinch_index_threshold: f32,
     pinch_middle_threshold: f32,
     thumb_index_distance: f32,
@@ -93,10 +97,10 @@ impl FrameSignals {
         let all_not_extended =
             !index_extended && !middle_extended && !ring_extended && !pinky_extended;
         let closed_palm_pose = all_not_extended && all_curled;
-        // Open palm is intentionally relaxed (ring OR pinky extended) for real camera variance.
         let open_palm_pose = index_extended
             && middle_extended
-            && (ring_extended || pinky_extended)
+            && ring_extended
+            && pinky_extended
             && !closed_palm_pose;
         let hand_down_pose = is_down(landmarks[8], landmarks[5])
             && is_down(landmarks[12], landmarks[9])
@@ -112,6 +116,16 @@ impl FrameSignals {
 
         let pinch_index = thumb_index_distance < pinch_index_threshold;
         let pinch_middle = thumb_middle_distance < pinch_middle_threshold;
+        let left_click_pose = pinch_index
+            && middle_extended
+            && ring_extended
+            && pinky_extended
+            && (!pinch_middle || thumb_index_distance <= thumb_middle_distance);
+        let right_click_pose = pinch_middle
+            && index_extended
+            && ring_extended
+            && pinky_extended
+            && (!pinch_index || thumb_middle_distance < thumb_index_distance);
 
         Some(Self {
             index_extended,
@@ -124,6 +138,8 @@ impl FrameSignals {
             hand_down_pose,
             pinch_index,
             pinch_middle,
+            left_click_pose,
+            right_click_pose,
             pinch_index_threshold,
             pinch_middle_threshold,
             thumb_index_distance,
@@ -137,11 +153,13 @@ impl FrameSignals {
 pub struct GestureEngine {
     settings: AppSettings,
     arm_pose_since_ms: Option<u64>,
+    clutch_pose_since_ms: Option<u64>,
+    unclutch_pose_since_ms: Option<u64>,
     stop_pose_since_ms: Option<u64>,
-    move_active: bool,
+    control_mode: ControlMode,
     prev_cursor_point: Option<Landmark>,
-    pinch_index_prev: bool,
-    pinch_middle_prev: bool,
+    left_click_pose_prev: bool,
+    right_click_pose_prev: bool,
     last_left_click_ms: Option<u64>,
     last_right_click_ms: Option<u64>,
 }
@@ -151,11 +169,13 @@ impl GestureEngine {
         Self {
             settings,
             arm_pose_since_ms: None,
+            clutch_pose_since_ms: None,
+            unclutch_pose_since_ms: None,
             stop_pose_since_ms: None,
-            move_active: false,
+            control_mode: ControlMode::Inactive,
             prev_cursor_point: None,
-            pinch_index_prev: false,
-            pinch_middle_prev: false,
+            left_click_pose_prev: false,
+            right_click_pose_prev: false,
             last_left_click_ms: None,
             last_right_click_ms: None,
         }
@@ -174,7 +194,7 @@ impl GestureEngine {
             return GestureHintState::no_hand();
         };
 
-        let hold_progress = if self.move_active {
+        let hold_progress = if self.control_mode != ControlMode::Inactive {
             1.0
         } else if signals.open_palm_pose {
             let hold_ms = self.settings.hold_to_control_ms.max(1) as f32;
@@ -185,37 +205,50 @@ impl GestureEngine {
             0.0
         };
 
-        let label = if self.move_active {
-            if signals.closed_palm_pose {
-                "stop_tracking_pose"
-            } else if signals.pinch_index {
-                "left_click_pinch"
-            } else if signals.pinch_middle {
-                "right_click_pinch"
-            } else if signals.two_finger_pose {
-                "move_cursor"
-            } else if signals.open_palm_pose {
-                "tracking_active_open_palm"
-            } else if signals.hand_down_pose {
-                "tracking_active_hand_down"
-            } else {
-                "tracking_active_idle"
+        let label = match self.control_mode {
+            ControlMode::Inactive => {
+                if signals.open_palm_pose {
+                    if hold_progress >= 1.0 {
+                        "control_ready"
+                    } else {
+                        "arming_control_open_palm"
+                    }
+                } else if signals.closed_palm_pose {
+                    "stop_tracking_pose"
+                } else {
+                    "idle_hand"
+                }
             }
-        } else if signals.open_palm_pose {
-            if hold_progress >= 1.0 {
-                "control_ready"
-            } else {
-                "arming_control_open_palm"
+            ControlMode::Move => {
+                if signals.closed_palm_pose {
+                    "stop_tracking_pose"
+                } else if signals.open_palm_pose {
+                    "clutch_enter_pose"
+                } else if signals.two_finger_pose {
+                    "move_cursor"
+                } else if signals.hand_down_pose {
+                    "tracking_active_hand_down"
+                } else {
+                    "tracking_active_idle"
+                }
             }
-        } else if signals.closed_palm_pose {
-            "stop_tracking_pose"
-        } else {
-            "idle_hand"
+            ControlMode::Clutch => {
+                if signals.closed_palm_pose {
+                    "stop_tracking_pose"
+                } else if signals.left_click_pose {
+                    "left_click_clutch_pinch"
+                } else if signals.right_click_pose {
+                    "right_click_clutch_pinch"
+                } else {
+                    "clutch_pause"
+                }
+            }
         };
 
         GestureHintState {
             label: label.to_string(),
-            move_active: self.move_active,
+            control_mode: self.control_mode,
+            move_active: self.control_mode != ControlMode::Inactive,
             two_finger_pose: signals.two_finger_pose,
             open_palm_pose: signals.open_palm_pose,
             closed_palm_pose: signals.closed_palm_pose,
@@ -238,13 +271,15 @@ impl GestureEngine {
 
     pub fn reset_on_lost(&mut self, _ts_ms: u64) -> Vec<ControlIntent> {
         self.arm_pose_since_ms = None;
+        self.clutch_pose_since_ms = None;
+        self.unclutch_pose_since_ms = None;
         self.stop_pose_since_ms = None;
         self.prev_cursor_point = None;
-        self.pinch_index_prev = false;
-        self.pinch_middle_prev = false;
+        self.left_click_pose_prev = false;
+        self.right_click_pose_prev = false;
 
-        if self.move_active {
-            self.move_active = false;
+        if self.control_mode != ControlMode::Inactive {
+            self.control_mode = ControlMode::Inactive;
             vec![ControlIntent::ControlOff]
         } else {
             Vec::new()
@@ -266,24 +301,29 @@ impl GestureEngine {
         let stop_pose = signals.closed_palm_pose;
         let pinch_index = signals.pinch_index;
         let pinch_middle = signals.pinch_middle;
+        let left_click_pose = signals.left_click_pose;
+        let right_click_pose = signals.right_click_pose;
 
-        if !self.move_active {
+        if self.control_mode == ControlMode::Inactive {
             if start_pose {
                 if self.arm_pose_since_ms.is_none() {
                     self.arm_pose_since_ms = Some(ts_ms);
                 }
                 if let Some(since) = self.arm_pose_since_ms {
                     if ts_ms.saturating_sub(since) >= self.settings.hold_to_control_ms {
-                        self.move_active = true;
+                        self.control_mode = ControlMode::Clutch;
                         intents.push(ControlIntent::ControlOn);
+                        intents.push(ControlIntent::ClutchOn);
                     }
                 }
             } else {
                 self.arm_pose_since_ms = None;
             }
+            self.clutch_pose_since_ms = None;
+            self.unclutch_pose_since_ms = None;
             self.stop_pose_since_ms = None;
-            self.pinch_index_prev = pinch_index;
-            self.pinch_middle_prev = pinch_middle;
+            self.left_click_pose_prev = left_click_pose;
+            self.right_click_pose_prev = right_click_pose;
             return intents;
         }
 
@@ -293,28 +333,100 @@ impl GestureEngine {
             const STOP_HOLD_MS: u64 = 180;
             let since = self.stop_pose_since_ms.get_or_insert(ts_ms);
             if ts_ms.saturating_sub(*since) >= STOP_HOLD_MS {
-                self.move_active = false;
+                self.control_mode = ControlMode::Inactive;
                 self.prev_cursor_point = None;
                 self.stop_pose_since_ms = None;
                 intents.push(ControlIntent::ControlOff);
             }
-            self.pinch_index_prev = pinch_index;
-            self.pinch_middle_prev = pinch_middle;
+            self.left_click_pose_prev = left_click_pose;
+            self.right_click_pose_prev = right_click_pose;
             return intents;
         }
         self.stop_pose_since_ms = None;
 
+        if self.control_mode == ControlMode::Move && start_pose {
+            let since = self.clutch_pose_since_ms.get_or_insert(ts_ms);
+            if ts_ms.saturating_sub(*since) >= self.settings.clutch_enter_ms {
+                self.control_mode = ControlMode::Clutch;
+                self.prev_cursor_point = None;
+                self.clutch_pose_since_ms = None;
+                self.unclutch_pose_since_ms = None;
+                intents.push(ControlIntent::ClutchOn);
+            }
+            self.right_click_pose_prev = right_click_pose;
+            self.left_click_pose_prev = left_click_pose;
+            return intents;
+        }
+
+        if self.control_mode == ControlMode::Move {
+            self.clutch_pose_since_ms = None;
+            self.unclutch_pose_since_ms = None;
+        }
+
+        if self.control_mode == ControlMode::Clutch {
+            let unclutch_candidate =
+                move_pose && !pinch_index && !pinch_middle && !signals.open_palm_pose;
+            if unclutch_candidate {
+                let since = self.unclutch_pose_since_ms.get_or_insert(ts_ms);
+                if ts_ms.saturating_sub(*since) >= self.settings.clutch_enter_ms {
+                    self.control_mode = ControlMode::Move;
+                    self.prev_cursor_point = None;
+                    self.unclutch_pose_since_ms = None;
+                    intents.push(ControlIntent::ClutchOff);
+                    self.left_click_pose_prev = false;
+                    self.right_click_pose_prev = false;
+                    return intents;
+                }
+            } else {
+                self.unclutch_pose_since_ms = None;
+            }
+
+            if left_click_pose
+                && !self.left_click_pose_prev
+                && can_fire(
+                    ts_ms,
+                    &mut self.last_left_click_ms,
+                    self.settings.click_cooldown_ms,
+                )
+            {
+                intents.push(ControlIntent::LeftClick);
+            }
+            if right_click_pose
+                && !self.right_click_pose_prev
+                && can_fire(
+                    ts_ms,
+                    &mut self.last_right_click_ms,
+                    self.settings.click_cooldown_ms,
+                )
+            {
+                intents.push(ControlIntent::RightClick);
+            }
+
+            self.prev_cursor_point = None;
+            self.left_click_pose_prev = left_click_pose;
+            self.right_click_pose_prev = right_click_pose;
+            return intents;
+        }
+
         if move_pose {
             let cursor = landmarks[8];
             if let Some(prev) = self.prev_cursor_point {
-                let mut dx = (cursor.x - prev.x) * self.settings.move_gain;
-                let mut dy = (cursor.y - prev.y) * self.settings.move_gain;
+                let raw_dx = cursor.x - prev.x;
+                let raw_dy = cursor.y - prev.y;
+                let magnitude = (raw_dx * raw_dx + raw_dy * raw_dy).sqrt();
+                let gain = self.settings.move_gain + (self.settings.move_accel * magnitude);
+                let range = self.settings.pointer_range;
+                let mut dx = raw_dx * gain * range;
+                let mut dy = raw_dy * gain * range;
                 if dx.abs() < self.settings.deadzone {
                     dx = 0.0;
                 }
                 if dy.abs() < self.settings.deadzone {
                     dy = 0.0;
                 }
+                let max_delta = self.settings.move_max_delta * range;
+                dx = dx.clamp(-max_delta, max_delta);
+                dy = dy.clamp(-max_delta, max_delta);
                 if dx != 0.0 || dy != 0.0 {
                     intents.push(ControlIntent::MoveDelta { dx, dy });
                 }
@@ -324,29 +436,8 @@ impl GestureEngine {
             self.prev_cursor_point = None;
         }
 
-        if pinch_index
-            && !self.pinch_index_prev
-            && can_fire(
-                ts_ms,
-                &mut self.last_left_click_ms,
-                self.settings.click_cooldown_ms,
-            )
-        {
-            intents.push(ControlIntent::LeftClick);
-        }
-        if pinch_middle
-            && !self.pinch_middle_prev
-            && can_fire(
-                ts_ms,
-                &mut self.last_right_click_ms,
-                self.settings.click_cooldown_ms,
-            )
-        {
-            intents.push(ControlIntent::RightClick);
-        }
-
-        self.pinch_index_prev = pinch_index;
-        self.pinch_middle_prev = pinch_middle;
+        self.left_click_pose_prev = left_click_pose;
+        self.right_click_pose_prev = right_click_pose;
         intents
     }
 }
@@ -580,33 +671,37 @@ mod tests {
     #[test]
     fn index_pinch_generates_left_click() {
         let mut g = GestureEngine::new(AppSettings::default());
-        let mut lm = open_palm_hand();
-        let _ = g.process(0, &lm);
-        let _ = g.process(100, &lm);
-        lm = two_finger_hand();
-        lm[4] = Landmark {
-            x: lm[8].x + 0.002,
-            y: lm[8].y + 0.002,
+        let lm_open = open_palm_hand();
+        let _ = g.process(0, &lm_open);
+        let _ = g.process(100, &lm_open); // control_on + clutch_on
+
+        let mut lm_click = lm_open.clone();
+        lm_click[4] = Landmark {
+            x: lm_click[8].x + 0.002,
+            y: lm_click[8].y + 0.002,
             z: 0.0,
         };
-        let out = g.process(200, &lm);
+        let out = g.process(140, &lm_click);
         assert!(out.iter().any(|i| matches!(i, ControlIntent::LeftClick)));
+        assert!(!out.iter().any(|i| matches!(i, ControlIntent::ClutchOff)));
     }
 
     #[test]
     fn middle_pinch_generates_right_click() {
         let mut g = GestureEngine::new(AppSettings::default());
-        let mut lm = open_palm_hand();
-        let _ = g.process(0, &lm);
-        let _ = g.process(100, &lm);
-        lm = two_finger_hand();
-        lm[4] = Landmark {
-            x: lm[12].x + 0.002,
-            y: lm[12].y + 0.001,
+        let lm_open = open_palm_hand();
+        let _ = g.process(0, &lm_open);
+        let _ = g.process(100, &lm_open); // control_on + clutch_on
+
+        let mut lm_click = lm_open.clone();
+        lm_click[4] = Landmark {
+            x: lm_click[12].x + 0.002,
+            y: lm_click[12].y + 0.001,
             z: 0.0,
         };
-        let out = g.process(220, &lm);
+        let out = g.process(140, &lm_click);
         assert!(out.iter().any(|i| matches!(i, ControlIntent::RightClick)));
+        assert!(!out.iter().any(|i| matches!(i, ControlIntent::ClutchOff)));
     }
 
     #[test]
@@ -616,10 +711,12 @@ mod tests {
         let _ = g.process(0, &lm);
         let _ = g.process(100, &lm);
         lm = two_finger_hand();
-        let _ = g.process(150, &lm);
+        let _ = g.process(120, &lm);
+        let _ = g.process(200, &lm);
+        let _ = g.process(240, &lm);
         lm[8].x += 0.03;
         lm[8].y -= 0.02;
-        let out = g.process(150, &lm);
+        let out = g.process(280, &lm);
         assert!(out
             .iter()
             .any(|i| matches!(i, ControlIntent::MoveDelta { .. })));
@@ -679,16 +776,19 @@ mod tests {
         assert!(!h.move_active);
         let _ = g.process(100, &lm); // ControlOn
         let lm_move = two_finger_hand();
-        let h2 = g.hint(120, &lm_move);
+        let _ = g.process(120, &lm_move);
+        let _ = g.process(200, &lm_move);
+        let h2 = g.hint(210, &lm_move);
         assert_eq!(h2.label, "move_cursor");
         assert!(h2.move_active);
+        assert_eq!(h2.control_mode, ControlMode::Move);
     }
 
     #[test]
-    fn relaxed_open_palm_with_three_fingers_starts_control() {
+    fn relaxed_open_palm_with_three_fingers_does_not_start_control() {
         let mut g = GestureEngine::new(AppSettings::default());
         let mut lm = open_palm_hand();
-        // Pinky bent but ring extended should still count as open palm start pose.
+        // Pinky bent means this is no longer a valid full-palm clutch/start pose.
         lm[18] = Landmark {
             x: 0.6,
             y: 0.64,
@@ -701,6 +801,134 @@ mod tests {
         };
         let _ = g.process(0, &lm);
         let out = g.process(100, &lm);
-        assert!(out.iter().any(|i| matches!(i, ControlIntent::ControlOn)));
+        assert!(!out.iter().any(|i| matches!(i, ControlIntent::ControlOn)));
+    }
+
+    #[test]
+    fn open_palm_while_active_enters_clutch_and_resumes_on_move() {
+        let mut g = GestureEngine::new(AppSettings::default());
+        let lm_open = open_palm_hand();
+        let _ = g.process(0, &lm_open);
+        let out_on = g.process(100, &lm_open);
+        assert!(out_on.iter().any(|i| matches!(i, ControlIntent::ControlOn)));
+        assert!(out_on.iter().any(|i| matches!(i, ControlIntent::ClutchOn)));
+
+        let lm_move = two_finger_hand();
+        let out_not_yet = g.process(130, &lm_move);
+        assert!(!out_not_yet
+            .iter()
+            .any(|i| matches!(i, ControlIntent::ClutchOff)));
+        let out_unclutch = g.process(220, &lm_move);
+        assert!(out_unclutch
+            .iter()
+            .any(|i| matches!(i, ControlIntent::ClutchOff)));
+
+        let _ = g.process(260, &lm_open);
+        let out_clutch = g.process(340, &lm_open);
+        assert!(out_clutch
+            .iter()
+            .any(|i| matches!(i, ControlIntent::ClutchOn)));
+        let hint = g.hint(345, &lm_open);
+        assert_eq!(hint.control_mode, ControlMode::Clutch);
+
+        let _ = g.process(370, &lm_move);
+        let out_resume = g.process(450, &lm_move);
+        assert!(out_resume
+            .iter()
+            .any(|i| matches!(i, ControlIntent::ClutchOff)));
+    }
+
+    #[test]
+    fn move_mode_blocks_clicks() {
+        let mut g = GestureEngine::new(AppSettings::default());
+        let lm_open = open_palm_hand();
+        let _ = g.process(0, &lm_open);
+        let _ = g.process(100, &lm_open); // control_on + clutch_on
+        let lm_move = two_finger_hand();
+        let _ = g.process(130, &lm_move);
+        let _ = g.process(220, &lm_move); // clutch_off -> move
+
+        let mut lm_move_pinch = lm_move.clone();
+        lm_move_pinch[4] = Landmark {
+            x: lm_move_pinch[8].x + 0.002,
+            y: lm_move_pinch[8].y + 0.002,
+            z: 0.0,
+        };
+        let out = g.process(260, &lm_move_pinch);
+        assert!(!out.iter().any(|i| matches!(i, ControlIntent::LeftClick)));
+        assert!(!out.iter().any(|i| matches!(i, ControlIntent::RightClick)));
+    }
+
+    #[test]
+    fn clutch_does_not_exit_during_pinch_attempt() {
+        let mut g = GestureEngine::new(AppSettings::default());
+        let lm_open = open_palm_hand();
+        let _ = g.process(0, &lm_open);
+        let _ = g.process(100, &lm_open); // control_on + clutch_on
+
+        let lm_move = two_finger_hand();
+        let _ = g.process(130, &lm_move);
+        let _ = g.process(220, &lm_move); // clutch_off -> move
+
+        let _ = g.process(260, &lm_open);
+        let _ = g.process(340, &lm_open); // clutch_on
+
+        let mut lm_move_pinch = lm_move.clone();
+        lm_move_pinch[4] = Landmark {
+            x: lm_move_pinch[8].x + 0.002,
+            y: lm_move_pinch[8].y + 0.002,
+            z: 0.0,
+        };
+        let out = g.process(370, &lm_move_pinch);
+        assert!(!out.iter().any(|i| matches!(i, ControlIntent::ClutchOff)));
+        assert!(!out
+            .iter()
+            .any(|i| matches!(i, ControlIntent::MoveDelta { .. })));
+        assert!(!out.iter().any(|i| matches!(i, ControlIntent::LeftClick)));
+    }
+
+    #[test]
+    fn pointer_range_scales_move_delta() {
+        let mut base = AppSettings::default();
+        base.pointer_range = 1.0;
+        let mut fast = AppSettings::default();
+        fast.pointer_range = 2.0;
+
+        let mut g1 = GestureEngine::new(base);
+        let mut g2 = GestureEngine::new(fast);
+        let lm_open = open_palm_hand();
+        let lm_move = two_finger_hand();
+
+        let _ = g1.process(0, &lm_open);
+        let _ = g1.process(100, &lm_open);
+        let _ = g1.process(130, &lm_move);
+        let _ = g1.process(220, &lm_move);
+        let _ = g1.process(260, &lm_move);
+        let mut lm_move_2 = lm_move.clone();
+        lm_move_2[8].x += 0.02;
+        let out1 = g1.process(300, &lm_move_2);
+
+        let _ = g2.process(0, &lm_open);
+        let _ = g2.process(100, &lm_open);
+        let _ = g2.process(130, &lm_move);
+        let _ = g2.process(220, &lm_move);
+        let _ = g2.process(260, &lm_move);
+        let out2 = g2.process(300, &lm_move_2);
+
+        let dx1 = out1
+            .iter()
+            .find_map(|i| match i {
+                ControlIntent::MoveDelta { dx, .. } => Some(*dx),
+                _ => None,
+            })
+            .unwrap_or(0.0);
+        let dx2 = out2
+            .iter()
+            .find_map(|i| match i {
+                ControlIntent::MoveDelta { dx, .. } => Some(*dx),
+                _ => None,
+            })
+            .unwrap_or(0.0);
+        assert!(dx2 > dx1);
     }
 }

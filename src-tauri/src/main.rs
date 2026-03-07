@@ -102,9 +102,13 @@ impl EventDumpWriter {
 #[derive(Debug, Serialize)]
 struct CalibrationResult {
     profile: CalibrationProfile,
+    pointer_range: f32,
     move_gain: f32,
+    move_accel: f32,
+    move_max_delta: f32,
     deadzone: f32,
     hold_to_control_ms: u64,
+    clutch_enter_ms: u64,
     pinch_threshold: f32,
     right_pinch_threshold: f32,
     click_cooldown_ms: u64,
@@ -117,9 +121,13 @@ struct CalibrationResult {
 #[serde(default)]
 struct CalibrationRequest {
     profile: CalibrationProfile,
+    pointer_range: Option<f32>,
     move_gain: Option<f32>,
+    move_accel: Option<f32>,
+    move_max_delta: Option<f32>,
     deadzone: Option<f32>,
     hold_to_control_ms: Option<u64>,
+    clutch_enter_ms: Option<u64>,
     pinch_threshold: Option<f32>,
     right_pinch_threshold: Option<f32>,
     click_cooldown_ms: Option<u64>,
@@ -134,9 +142,13 @@ impl Default for CalibrationRequest {
     fn default() -> Self {
         Self {
             profile: CalibrationProfile::Balanced,
+            pointer_range: None,
             move_gain: None,
+            move_accel: None,
+            move_max_delta: None,
             deadzone: None,
             hold_to_control_ms: None,
+            clutch_enter_ms: None,
             pinch_threshold: None,
             right_pinch_threshold: None,
             click_cooldown_ms: None,
@@ -222,14 +234,26 @@ fn run_calibration(
         .map_err(|_| "settings lock poisoned".to_string())?
         .clone();
     cfg.apply_calibration_profile(req.profile);
+    if let Some(v) = req.pointer_range {
+        cfg.pointer_range = v.clamp(0.5, 3.0);
+    }
     if let Some(v) = req.move_gain {
         cfg.move_gain = v.clamp(1.0, 15.0);
+    }
+    if let Some(v) = req.move_accel {
+        cfg.move_accel = v.clamp(0.0, 30.0);
+    }
+    if let Some(v) = req.move_max_delta {
+        cfg.move_max_delta = v.clamp(0.01, 0.25);
     }
     if let Some(v) = req.deadzone {
         cfg.deadzone = v.clamp(0.001, 0.08);
     }
     if let Some(v) = req.hold_to_control_ms {
         cfg.hold_to_control_ms = v.clamp(20, 300);
+    }
+    if let Some(v) = req.clutch_enter_ms {
+        cfg.clutch_enter_ms = v.clamp(20, 300);
     }
     if let Some(v) = req.pinch_threshold {
         cfg.pinch_threshold = v.clamp(0.015, 0.090);
@@ -270,9 +294,13 @@ fn run_calibration(
     state.send(RuntimeCommand::UpdateSettings(cfg.clone()))?;
     Ok(CalibrationResult {
         profile: cfg.calibration_profile,
+        pointer_range: cfg.pointer_range,
         move_gain: cfg.move_gain,
+        move_accel: cfg.move_accel,
+        move_max_delta: cfg.move_max_delta,
         deadzone: cfg.deadzone,
         hold_to_control_ms: cfg.hold_to_control_ms,
+        clutch_enter_ms: cfg.clutch_enter_ms,
         pinch_threshold: cfg.pinch_threshold,
         right_pinch_threshold: cfg.right_pinch_threshold,
         click_cooldown_ms: cfg.click_cooldown_ms,

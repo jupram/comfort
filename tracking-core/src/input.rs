@@ -5,11 +5,17 @@ use tracing::debug;
 
 pub struct SafeInputDriver {
     settings: AppSettings,
+    move_remainder_x: f32,
+    move_remainder_y: f32,
 }
 
 impl SafeInputDriver {
     pub fn new(settings: AppSettings) -> Self {
-        Self { settings }
+        Self {
+            settings,
+            move_remainder_x: 0.0,
+            move_remainder_y: 0.0,
+        }
     }
 
     pub fn update_settings(&mut self, settings: AppSettings) {
@@ -32,10 +38,11 @@ impl SafeInputDriver {
     fn apply_safe_mode(&mut self, intent: &ControlIntent) -> anyhow::Result<()> {
         match intent {
             ControlIntent::MoveDelta { dx, dy } if self.settings.allow_safe_mode_movement => {
-                let clamped_dx = clamp_scaled(*dx, 12.0);
-                let clamped_dy = clamp_scaled(*dy, 12.0);
-                platform::mouse_move_relative(clamped_dx, clamped_dy)
-                    .context("safe-mode mouse move failed")?;
+                let (px_dx, px_dy) = self.map_move_delta(*dx, *dy, false);
+                if px_dx != 0 || px_dy != 0 {
+                    platform::mouse_move_relative(px_dx, px_dy)
+                        .context("safe-mode mouse move failed")?;
+                }
             }
             _ => {
                 debug!(?intent, "safe_mode active; non-move intent suppressed");
@@ -47,23 +54,85 @@ impl SafeInputDriver {
     fn apply_full(&mut self, intent: &ControlIntent) -> anyhow::Result<()> {
         match intent {
             ControlIntent::MoveDelta { dx, dy } => {
-                platform::mouse_move_relative(clamp_scaled(*dx, 40.0), clamp_scaled(*dy, 40.0))
-                    .context("mouse move failed")?;
+                let (px_dx, px_dy) = self.map_move_delta(*dx, *dy, true);
+                if px_dx != 0 || px_dy != 0 {
+                    platform::mouse_move_relative(px_dx, px_dy).context("mouse move failed")?;
+                }
             }
             ControlIntent::LeftClick => platform::left_click().context("left click failed")?,
             ControlIntent::RightClick => platform::right_click().context("right click failed")?,
             ControlIntent::Scroll { dy } => {
                 platform::wheel_scroll(clamp_scaled(*dy, 120.0)).context("scroll failed")?;
             }
-            ControlIntent::ControlOn | ControlIntent::ControlOff | ControlIntent::Paused => {}
+            ControlIntent::ControlOn
+            | ControlIntent::ControlOff
+            | ControlIntent::ClutchOn
+            | ControlIntent::ClutchOff
+            | ControlIntent::Paused => {}
         }
         Ok(())
+    }
+
+    fn map_move_delta(&mut self, dx: f32, dy: f32, full_mode: bool) -> (i32, i32) {
+        let speed = (dx * dx + dy * dy).sqrt();
+        let (base_scale, accel_scale, cap) = if full_mode {
+            (55.0_f32, 380.0_f32, 180_i32)
+        } else {
+            (18.0_f32, 120.0_f32, 36_i32)
+        };
+        let gain = base_scale + accel_scale * speed;
+
+        let raw_x = dx * gain + self.move_remainder_x;
+        let raw_y = dy * gain + self.move_remainder_y;
+
+        let out_x = raw_x.round() as i32;
+        let out_y = raw_y.round() as i32;
+        let clamped_x = out_x.clamp(-cap, cap);
+        let clamped_y = out_y.clamp(-cap, cap);
+
+        self.move_remainder_x = if clamped_x == out_x {
+            raw_x - out_x as f32
+        } else {
+            0.0
+        };
+        self.move_remainder_y = if clamped_y == out_y {
+            raw_y - out_y as f32
+        } else {
+            0.0
+        };
+
+        (clamped_x, clamped_y)
     }
 }
 
 fn clamp_scaled(value: f32, scale: f32) -> i32 {
     let raw = (value * scale).round() as i32;
     raw.clamp(-120, 120)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accumulates_subpixel_motion() {
+        let mut driver = SafeInputDriver::new(AppSettings::default());
+        let first = driver.map_move_delta(0.003, 0.0, true);
+        let second = driver.map_move_delta(0.003, 0.0, true);
+        let third = driver.map_move_delta(0.003, 0.0, true);
+        assert_eq!(first.0, 0);
+        assert!(second.0 >= 0);
+        assert!(third.0 >= second.0);
+    }
+
+    #[test]
+    fn faster_swipe_produces_larger_delta() {
+        let mut slow_driver = SafeInputDriver::new(AppSettings::default());
+        let mut fast_driver = SafeInputDriver::new(AppSettings::default());
+        let slow = slow_driver.map_move_delta(0.012, 0.0, true).0;
+        let fast = fast_driver.map_move_delta(0.045, 0.0, true).0;
+        assert!(fast.abs() > slow.abs());
+    }
 }
 
 #[cfg(windows)]

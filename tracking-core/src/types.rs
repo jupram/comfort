@@ -36,6 +36,14 @@ pub enum VisionStatus {
     Stopped,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlMode {
+    Inactive,
+    Move,
+    Clutch,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ControlIntent {
@@ -45,6 +53,8 @@ pub enum ControlIntent {
     Scroll { dy: f32 },
     ControlOn,
     ControlOff,
+    ClutchOn,
+    ClutchOff,
     Paused,
 }
 
@@ -78,6 +88,7 @@ pub struct GestureHint {
     pub ts_ms: u64,
     pub frame_id: u64,
     pub label: String,
+    pub control_mode: ControlMode,
     pub move_active: bool,
     pub two_finger_pose: bool,
     pub open_palm_pose: bool,
