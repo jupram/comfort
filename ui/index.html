@@ -1,0 +1,779 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" href="favicon.ico" />
+    <title>Gesture Mouse - Stage 4</title>
+    <style>
+      :root {
+        --bg: #eef2f7;
+        --card: #ffffff;
+        --line: #ccd5e2;
+        --text: #1f2735;
+        --muted: #526079;
+        --pill: #e7edf7;
+        --accent: #0f5ad8;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        font-family: "Segoe UI", Tahoma, sans-serif;
+        background: radial-gradient(circle at top right, #dfe8f5 0%, var(--bg) 45%);
+        margin: 0;
+        padding: 20px;
+        color: var(--text);
+      }
+      .wrap {
+        max-width: 1240px;
+        margin: 0 auto;
+      }
+      h1 {
+        margin: 0 0 14px 0;
+      }
+      h2 {
+        margin: 0 0 8px 0;
+        font-size: 17px;
+      }
+      .row {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-bottom: 12px;
+      }
+      .dashboard {
+        display: grid;
+        grid-template-columns: 1.45fr 1fr 1fr;
+        gap: 12px;
+      }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 12px;
+      }
+      .full {
+        grid-column: 1 / -1;
+      }
+      button {
+        border: 1px solid var(--line);
+        background: #fff;
+        color: var(--text);
+        border-radius: 9px;
+        padding: 8px 12px;
+        cursor: pointer;
+      }
+      button.primary {
+        background: var(--accent);
+        color: #fff;
+        border-color: var(--accent);
+      }
+      button:disabled {
+        opacity: 0.55;
+        cursor: default;
+      }
+      .preview-wrap {
+        background: #09111f;
+        border-radius: 8px;
+        overflow: hidden;
+      }
+      #preview {
+        width: 100%;
+        min-height: 280px;
+        display: block;
+        object-fit: contain;
+      }
+      .status-grid {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 8px;
+      }
+      .status-pill {
+        display: inline-block;
+        font-size: 12px;
+        border-radius: 999px;
+        padding: 3px 10px;
+        background: var(--pill);
+        color: #203156;
+      }
+      .meta {
+        font-size: 12px;
+        color: var(--muted);
+        margin-top: 8px;
+      }
+      .steps {
+        margin: 8px 0 0 0;
+        padding-left: 18px;
+      }
+      .steps li {
+        margin: 4px 0;
+      }
+      .steps li.active {
+        color: #0f5ad8;
+        font-weight: 600;
+      }
+      .steps li.done {
+        color: #247642;
+      }
+      .form-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(120px, 1fr));
+        gap: 9px;
+      }
+      .field {
+        display: grid;
+        gap: 3px;
+      }
+      .field label {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .field input,
+      .field select {
+        width: 100%;
+        border-radius: 8px;
+        border: 1px solid var(--line);
+        padding: 7px 8px;
+      }
+      .checks {
+        display: flex;
+        gap: 16px;
+        flex-wrap: wrap;
+        margin-top: 10px;
+      }
+      .checks label {
+        font-size: 13px;
+      }
+      pre {
+        margin: 0;
+        background: #0f1728;
+        color: #d3ddff;
+        border-radius: 8px;
+        padding: 12px;
+        white-space: pre-wrap;
+        max-height: 280px;
+        overflow: auto;
+      }
+      .small {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      @media (max-width: 1100px) {
+        .dashboard {
+          grid-template-columns: 1fr;
+        }
+        .form-grid {
+          grid-template-columns: repeat(2, minmax(120px, 1fr));
+        }
+      }
+      @media (max-width: 680px) {
+        .form-grid {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>Gesture Mouse - Stage 4</h1>
+      <div class="row">
+        <button id="start" class="primary">Start</button>
+        <button id="stop">Stop</button>
+        <button id="pause">Pause</button>
+        <button id="resume">Resume</button>
+        <button id="load-settings">Load Settings</button>
+        <button id="save-settings">Save Settings</button>
+        <button id="restore-defaults">Restore Defaults</button>
+      </div>
+      <div class="dashboard">
+        <div class="card">
+          <h2>Camera + Tracking</h2>
+          <div class="preview-wrap">
+            <img id="preview" alt="Live camera preview" />
+          </div>
+          <div id="frame-meta" class="meta">No frames yet</div>
+        </div>
+        <div class="card">
+          <h2>Runtime State</h2>
+          <div class="status-grid">
+            <div>Vision: <span id="vision-status" class="status-pill">unknown</span></div>
+            <div>Tracking: <span id="tracking-status" class="status-pill">unknown</span></div>
+            <div>Last Event: <span id="last-event" class="status-pill">none</span></div>
+            <div>Current Pose: <span id="pose-hint" class="status-pill">none</span></div>
+          </div>
+          <div id="hint-meta" class="meta">No gesture hint yet</div>
+          <div id="health-meta" class="meta">No health metrics yet</div>
+        </div>
+        <div class="card">
+          <h2>Guided Calibration</h2>
+          <div class="field">
+            <label for="calib-profile">Profile</label>
+            <select id="calib-profile">
+              <option value="comfort">Comfort</option>
+              <option value="balanced" selected>Balanced</option>
+              <option value="responsive">Responsive</option>
+            </select>
+          </div>
+          <div class="row" style="margin-top: 8px; margin-bottom: 0">
+            <button id="start-calibration" class="primary">Start Guided Calibration</button>
+            <button id="cancel-calibration">Cancel</button>
+            <button id="apply-calibration" disabled>Apply Suggested Calibration</button>
+          </div>
+          <div id="calibration-state" class="meta">Not started</div>
+          <ol id="calibration-steps" class="steps"></ol>
+          <div id="calibration-summary" class="meta">No calibration stats yet</div>
+        </div>
+        <div class="card full">
+          <h2>Settings</h2>
+          <div class="form-grid">
+            <div class="field"><label>Backend</label><select id="set-vision-backend"><option value="python_mediapipe">Python MediaPipe</option><option value="mock">Mock</option></select></div>
+            <div class="field"><label>Calibration Profile</label><select id="set-calibration-profile"><option value="comfort">Comfort</option><option value="balanced">Balanced</option><option value="responsive">Responsive</option></select></div>
+            <div class="field"><label>Camera Index</label><input id="set-camera-index" type="number" step="1" /></div>
+            <div class="field"><label>Camera FPS</label><input id="set-camera-fps" type="number" step="1" /></div>
+            <div class="field"><label>Camera Width</label><input id="set-camera-width" type="number" step="1" /></div>
+            <div class="field"><label>Camera Height</label><input id="set-camera-height" type="number" step="1" /></div>
+            <div class="field"><label>Move Gain</label><input id="set-move-gain" type="number" step="0.1" /></div>
+            <div class="field"><label>Deadzone</label><input id="set-deadzone" type="number" step="0.001" /></div>
+            <div class="field"><label>Hold to Control (ms)</label><input id="set-hold-ms" type="number" step="1" /></div>
+            <div class="field"><label>Pinch Threshold</label><input id="set-pinch" type="number" step="0.001" /></div>
+            <div class="field"><label>Right Pinch Threshold</label><input id="set-right-pinch" type="number" step="0.001" /></div>
+            <div class="field"><label>Click Cooldown (ms)</label><input id="set-click-cooldown" type="number" step="1" /></div>
+            <div class="field"><label>Confidence Lock</label><input id="set-conf-lock" type="number" step="0.01" /></div>
+            <div class="field"><label>Confidence Unlock</label><input id="set-conf-unlock" type="number" step="0.01" /></div>
+            <div class="field"><label>Lost Timeout (ms)</label><input id="set-lost-timeout" type="number" step="1" min="500" /></div>
+            <div class="field"><label>Python Executable</label><input id="set-python-exec" type="text" /></div>
+            <div class="field"><label>MediaPipe Script Path</label><input id="set-script-path" type="text" /></div>
+          </div>
+          <div class="checks">
+            <label><input id="set-input-enabled" type="checkbox" /> Input Injection Enabled</label>
+            <label><input id="set-safe-mode" type="checkbox" /> Safe Mode</label>
+            <label><input id="set-safe-move" type="checkbox" /> Allow Safe-Mode Movement</label>
+            <label><input id="set-diagnostics" type="checkbox" /> Diagnostics Enabled</label>
+          </div>
+          <div id="settings-meta" class="meta">Settings not loaded yet</div>
+        </div>
+        <div class="card full">
+          <h2>Event Log</h2>
+          <pre id="log"></pre>
+          <div class="small">Events: <span id="event-counts">none</span></div>
+        </div>
+      </div>
+    </div>
+    <script>
+      const log = document.getElementById("log");
+      const preview = document.getElementById("preview");
+      const frameMeta = document.getElementById("frame-meta");
+      const visionStatusEl = document.getElementById("vision-status");
+      const trackingStatusEl = document.getElementById("tracking-status");
+      const lastEventEl = document.getElementById("last-event");
+      const poseHintEl = document.getElementById("pose-hint");
+      const hintMeta = document.getElementById("hint-meta");
+      const healthMeta = document.getElementById("health-meta");
+      const settingsMeta = document.getElementById("settings-meta");
+      const calibrationStateEl = document.getElementById("calibration-state");
+      const calibrationStepsEl = document.getElementById("calibration-steps");
+      const calibrationSummaryEl = document.getElementById("calibration-summary");
+      const eventCountsEl = document.getElementById("event-counts");
+
+      let currentSettings = null;
+      let latestHint = {};
+      let latestHealth = null;
+      let frameCount = 0;
+      let previewCount = 0;
+      const eventCounts = {};
+
+      const calibrationSteps = [
+        {
+          id: "open_palm_start",
+          title: "Show open palm for 2 seconds",
+          instruction: "Keep full palm visible to arm control.",
+          holdMs: 2000,
+        },
+        {
+          id: "move_two_finger",
+          title: "Use two-finger movement for 6 seconds",
+          instruction: "Move pointer with index+middle pose.",
+          holdMs: 6000,
+          minMove: 0.08,
+        },
+        {
+          id: "click_test",
+          title: "Trigger one left click and one right click",
+          instruction: "Do thumb-index pinch, then thumb-middle pinch.",
+          holdMs: 0,
+        },
+        {
+          id: "closed_fist_stop",
+          title: "Show closed fist for 1 second",
+          instruction: "Closed fist stops control and completes calibration.",
+          holdMs: 1000,
+        },
+      ];
+
+      const calibration = {
+        active: false,
+        finished: false,
+        stepIndex: 0,
+        stepProgress: 0,
+        conditionSinceMs: null,
+        stepMoveDistance: 0,
+        stepClicks: { left: 0, right: 0 },
+        confidenceSamples: [],
+        movementSamples: [],
+        pinchIndexSamples: [],
+        pinchMiddleSamples: [],
+        jitterSamples: [],
+        controlOffCount: 0,
+        prevIndexPoint: null,
+        prevPinchIndex: false,
+        prevPinchMiddle: false,
+        suggestedRequest: null,
+      };
+
+      const push = (msg) => {
+        const line = `[${new Date().toLocaleTimeString()}] ${msg}`;
+        log.textContent = line + "\n" + log.textContent;
+      };
+
+      const bumpEvent = (name) => {
+        eventCounts[name] = (eventCounts[name] || 0) + 1;
+        const pairs = Object.entries(eventCounts).map(([k, v]) => `${k}:${v}`);
+        eventCountsEl.textContent = pairs.join(" | ");
+      };
+
+      const getInvoke = () => {
+        const tauri = window.__TAURI__;
+        if (!tauri) return null;
+        if (typeof tauri.invoke === "function") return tauri.invoke;
+        if (tauri.tauri && typeof tauri.tauri.invoke === "function") return tauri.tauri.invoke;
+        return null;
+      };
+
+      const getListen = () => {
+        const tauri = window.__TAURI__;
+        if (!tauri) return null;
+        if (tauri.event && typeof tauri.event.listen === "function") return tauri.event.listen;
+        if (typeof tauri.listen === "function") return tauri.listen;
+        return null;
+      };
+
+      const invoke = async (cmd, args = {}) => {
+        const inv = getInvoke();
+        if (!inv) {
+          push("Tauri invoke API not available");
+          return null;
+        }
+        return inv(cmd, args);
+      };
+
+      const listen = async (event, cb) => {
+        const fn = getListen();
+        if (!fn) {
+          push("Tauri event API not available");
+          return;
+        }
+        await fn(event, cb);
+      };
+
+      const mean = (arr) => {
+        if (!arr.length) return 0;
+        return arr.reduce((a, b) => a + b, 0) / arr.length;
+      };
+
+      const median = (arr) => {
+        if (!arr.length) return 0;
+        const sorted = [...arr].sort((a, b) => a - b);
+        const mid = Math.floor(sorted.length / 2);
+        if (sorted.length % 2 === 0) return (sorted[mid - 1] + sorted[mid]) / 2;
+        return sorted[mid];
+      };
+
+      const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+      const renderCalibrationSteps = () => {
+        calibrationStepsEl.innerHTML = calibrationSteps
+          .map((step, idx) => {
+            const cls = idx < calibration.stepIndex ? "done" : idx === calibration.stepIndex ? "active" : "";
+            return `<li class="${cls}"><strong>${step.title}</strong><div class="small">${step.instruction}</div></li>`;
+          })
+          .join("");
+      };
+
+      const activeStep = () => calibrationSteps[calibration.stepIndex] || null;
+
+      const setCalibrationStateText = () => {
+        if (!calibration.active && !calibration.finished) {
+          calibrationStateEl.textContent = "Not started";
+          return;
+        }
+        if (calibration.finished) {
+          calibrationStateEl.textContent = "Calibration complete. Review and apply suggested tuning.";
+          return;
+        }
+        const step = activeStep();
+        const pct = Math.round(calibration.stepProgress * 100);
+        calibrationStateEl.textContent = `Step ${calibration.stepIndex + 1}/${calibrationSteps.length}: ${step.title} (${pct}%)`;
+      };
+
+      const resetCalibrationState = () => {
+        calibration.active = false;
+        calibration.finished = false;
+        calibration.stepIndex = 0;
+        calibration.stepProgress = 0;
+        calibration.conditionSinceMs = null;
+        calibration.stepMoveDistance = 0;
+        calibration.stepClicks = { left: 0, right: 0 };
+        calibration.confidenceSamples = [];
+        calibration.movementSamples = [];
+        calibration.pinchIndexSamples = [];
+        calibration.pinchMiddleSamples = [];
+        calibration.jitterSamples = [];
+        calibration.controlOffCount = 0;
+        calibration.prevIndexPoint = null;
+        calibration.prevPinchIndex = false;
+        calibration.prevPinchMiddle = false;
+        calibration.suggestedRequest = null;
+        document.getElementById("apply-calibration").disabled = true;
+      };
+
+      const startCalibration = () => {
+        resetCalibrationState();
+        calibration.active = true;
+        renderCalibrationSteps();
+        setCalibrationStateText();
+        calibrationSummaryEl.textContent = "Collecting movement, confidence, and pinch metrics...";
+        push("guided calibration started");
+      };
+
+      const cancelCalibration = () => {
+        resetCalibrationState();
+        renderCalibrationSteps();
+        setCalibrationStateText();
+        calibrationSummaryEl.textContent = "Calibration canceled.";
+        push("guided calibration canceled");
+      };
+
+      const advanceCalibrationStep = () => {
+        calibration.stepIndex += 1;
+        calibration.stepProgress = 0;
+        calibration.conditionSinceMs = null;
+        calibration.stepMoveDistance = 0;
+        calibration.stepClicks = { left: 0, right: 0 };
+        calibration.prevPinchIndex = false;
+        calibration.prevPinchMiddle = false;
+        renderCalibrationSteps();
+        if (calibration.stepIndex >= calibrationSteps.length) {
+          calibration.active = false;
+          calibration.finished = true;
+          calibration.suggestedRequest = buildCalibrationRequestFromData();
+          document.getElementById("apply-calibration").disabled = false;
+          setCalibrationStateText();
+          calibrationSummaryEl.textContent = summarizeCalibrationData();
+          push("guided calibration completed");
+          return;
+        }
+        setCalibrationStateText();
+      };
+
+      const summarizeCalibrationData = () => {
+        const avgConf = mean(calibration.confidenceSamples);
+        const medMove = median(calibration.movementSamples);
+        const medPinchL = median(calibration.pinchIndexSamples);
+        const medPinchR = median(calibration.pinchMiddleSamples);
+        return `avg_conf=${avgConf.toFixed(2)} med_move=${medMove.toFixed(4)} med_pinch(index/middle)=${medPinchL.toFixed(3)}/${medPinchR.toFixed(3)} control_off_events=${calibration.controlOffCount}`;
+      };
+
+      const buildCalibrationRequestFromData = () => {
+        const profile = document.getElementById("calib-profile").value;
+        const avgConf = mean(calibration.confidenceSamples);
+        const medMove = median(calibration.movementSamples);
+        const medPinchL = median(calibration.pinchIndexSamples);
+        const medPinchR = median(calibration.pinchMiddleSamples);
+        const jitter = mean(calibration.jitterSamples);
+
+        let moveGain = 5.5;
+        if (medMove < 0.0035) moveGain = 7.0;
+        else if (medMove < 0.0055) moveGain = 6.2;
+        else if (medMove < 0.0085) moveGain = 5.4;
+        else moveGain = 4.8;
+
+        const deadzone = clamp(jitter * 3.2, 0.006, 0.024);
+        const confLock = clamp(avgConf > 0 ? avgConf + 0.08 : 0.65, 0.50, 0.85);
+        const confUnlock = clamp(confLock - 0.18, 0.28, 0.70);
+        const pinchL = medPinchL > 0 ? clamp(medPinchL + 0.010, 0.022, 0.060) : undefined;
+        const pinchR = medPinchR > 0 ? clamp(medPinchR + 0.010, 0.024, 0.065) : undefined;
+
+        const request = {
+          profile,
+          move_gain: moveGain,
+          deadzone: deadzone,
+          hold_to_control_ms: calibration.controlOffCount > 2 ? 90 : 70,
+          click_cooldown_ms: profile === "responsive" ? 140 : 170,
+          confidence_lock: confLock,
+          confidence_unlock: confUnlock,
+          pinch_threshold: pinchL,
+          right_pinch_threshold: pinchR,
+          input_injection_enabled: !!currentSettings?.input_injection_enabled,
+          safe_mode: !!currentSettings?.safe_mode,
+          allow_safe_mode_movement: !!currentSettings?.allow_safe_mode_movement,
+        };
+        return request;
+      };
+
+      const evaluateCalibrationStep = (hint) => {
+        if (!calibration.active) return;
+        const step = activeStep();
+        if (!step) return;
+        const now = Date.now();
+
+        let completed = false;
+        if (step.id === "open_palm_start") {
+          if (hint.open_palm_pose) {
+            calibration.conditionSinceMs ??= now;
+            calibration.stepProgress = clamp((now - calibration.conditionSinceMs) / step.holdMs, 0, 1);
+            completed = calibration.stepProgress >= 1;
+          } else {
+            calibration.conditionSinceMs = null;
+            calibration.stepProgress = 0;
+          }
+        } else if (step.id === "move_two_finger") {
+          if (hint.two_finger_pose) {
+            calibration.conditionSinceMs ??= now;
+            const holdProgress = clamp((now - calibration.conditionSinceMs) / step.holdMs, 0, 1);
+            const motionProgress = clamp(calibration.stepMoveDistance / step.minMove, 0, 1);
+            calibration.stepProgress = Math.min(holdProgress, motionProgress);
+            completed = holdProgress >= 1 && motionProgress >= 1;
+          } else {
+            calibration.conditionSinceMs = null;
+            calibration.stepProgress = 0;
+          }
+        } else if (step.id === "click_test") {
+          const score = calibration.stepClicks.left + calibration.stepClicks.right;
+          calibration.stepProgress = clamp(score / 2, 0, 1);
+          completed = calibration.stepClicks.left >= 1 && calibration.stepClicks.right >= 1;
+        } else if (step.id === "closed_fist_stop") {
+          if (hint.closed_palm_pose) {
+            calibration.conditionSinceMs ??= now;
+            calibration.stepProgress = clamp((now - calibration.conditionSinceMs) / step.holdMs, 0, 1);
+            completed = calibration.stepProgress >= 1;
+          } else {
+            calibration.conditionSinceMs = null;
+            calibration.stepProgress = 0;
+          }
+        }
+
+        setCalibrationStateText();
+        if (completed) advanceCalibrationStep();
+      };
+
+      const applySettingsToForm = (s) => {
+        if (!s) return;
+        document.getElementById("set-vision-backend").value = s.vision_backend;
+        document.getElementById("set-calibration-profile").value = s.calibration_profile || "balanced";
+        document.getElementById("set-camera-index").value = s.camera_index;
+        document.getElementById("set-camera-fps").value = s.camera_fps;
+        document.getElementById("set-camera-width").value = s.camera_width;
+        document.getElementById("set-camera-height").value = s.camera_height;
+        document.getElementById("set-move-gain").value = s.move_gain;
+        document.getElementById("set-deadzone").value = s.deadzone;
+        document.getElementById("set-hold-ms").value = s.hold_to_control_ms;
+        document.getElementById("set-pinch").value = s.pinch_threshold;
+        document.getElementById("set-right-pinch").value = s.right_pinch_threshold;
+        document.getElementById("set-click-cooldown").value = s.click_cooldown_ms;
+        document.getElementById("set-conf-lock").value = s.confidence_lock;
+        document.getElementById("set-conf-unlock").value = s.confidence_unlock;
+        document.getElementById("set-lost-timeout").value = s.lost_timeout_ms;
+        document.getElementById("set-python-exec").value = s.python_executable;
+        document.getElementById("set-script-path").value = s.mediapipe_script_path || "";
+        document.getElementById("set-input-enabled").checked = !!s.input_injection_enabled;
+        document.getElementById("set-safe-mode").checked = !!s.safe_mode;
+        document.getElementById("set-safe-move").checked = !!s.allow_safe_mode_movement;
+        document.getElementById("set-diagnostics").checked = !!s.diagnostics_enabled;
+        settingsMeta.textContent = `Loaded profile=${s.calibration_profile || "balanced"} calibrated_at_ms=${s.calibrated_at_ms ?? "never"}`;
+      };
+
+      const getNumber = (id, fallback) => {
+        const n = Number(document.getElementById(id).value);
+        return Number.isFinite(n) ? n : fallback;
+      };
+
+      const readSettingsFromForm = () => {
+        const base = currentSettings || {};
+        return {
+          ...base,
+          vision_backend: document.getElementById("set-vision-backend").value,
+          calibration_profile: document.getElementById("set-calibration-profile").value,
+          camera_index: Math.round(getNumber("set-camera-index", base.camera_index ?? 0)),
+          camera_fps: Math.max(1, Math.round(getNumber("set-camera-fps", base.camera_fps ?? 30))),
+          camera_width: Math.max(160, Math.round(getNumber("set-camera-width", base.camera_width ?? 1280))),
+          camera_height: Math.max(120, Math.round(getNumber("set-camera-height", base.camera_height ?? 720))),
+          move_gain: getNumber("set-move-gain", base.move_gain ?? 5.5),
+          deadzone: getNumber("set-deadzone", base.deadzone ?? 0.012),
+          hold_to_control_ms: Math.max(20, Math.round(getNumber("set-hold-ms", base.hold_to_control_ms ?? 70))),
+          pinch_threshold: getNumber("set-pinch", base.pinch_threshold ?? 0.035),
+          right_pinch_threshold: getNumber("set-right-pinch", base.right_pinch_threshold ?? 0.04),
+          click_cooldown_ms: Math.max(60, Math.round(getNumber("set-click-cooldown", base.click_cooldown_ms ?? 170))),
+          confidence_lock: getNumber("set-conf-lock", base.confidence_lock ?? 0.65),
+          confidence_unlock: getNumber("set-conf-unlock", base.confidence_unlock ?? 0.45),
+          lost_timeout_ms: Math.max(500, Math.round(getNumber("set-lost-timeout", base.lost_timeout_ms ?? 700))),
+          python_executable: document.getElementById("set-python-exec").value || "python",
+          mediapipe_script_path: document.getElementById("set-script-path").value || null,
+          input_injection_enabled: document.getElementById("set-input-enabled").checked,
+          safe_mode: document.getElementById("set-safe-mode").checked,
+          allow_safe_mode_movement: document.getElementById("set-safe-move").checked,
+          diagnostics_enabled: document.getElementById("set-diagnostics").checked,
+        };
+      };
+
+      const loadSettings = async () => {
+        const settings = await invoke("load_settings");
+        if (!settings) return;
+        currentSettings = settings;
+        applySettingsToForm(settings);
+        push(`settings loaded: profile=${settings.calibration_profile} gain=${settings.move_gain}`);
+      };
+
+      const saveSettings = async () => {
+        const next = readSettingsFromForm();
+        await invoke("save_settings", { settings: next });
+        currentSettings = next;
+        settingsMeta.textContent = "Saved and applied to runtime.";
+        push("settings saved");
+      };
+
+      const restoreDefaults = async () => {
+        const restored = await invoke("reset_settings");
+        if (!restored) return;
+        currentSettings = restored;
+        applySettingsToForm(restored);
+        push("settings restored to defaults");
+      };
+
+      const applySuggestedCalibration = async () => {
+        if (!calibration.suggestedRequest) return;
+        const out = await invoke("run_calibration", { request: calibration.suggestedRequest });
+        if (!out) return;
+        push(`calibration applied: ${JSON.stringify(out)}`);
+        await loadSettings();
+      };
+
+      document.getElementById("start").onclick = () => invoke("start_tracking");
+      document.getElementById("stop").onclick = () => invoke("stop_tracking");
+      document.getElementById("pause").onclick = () => invoke("pause_tracking");
+      document.getElementById("resume").onclick = () => invoke("resume_tracking");
+      document.getElementById("load-settings").onclick = () => loadSettings();
+      document.getElementById("save-settings").onclick = () => saveSettings();
+      document.getElementById("restore-defaults").onclick = () => restoreDefaults();
+      document.getElementById("start-calibration").onclick = () => startCalibration();
+      document.getElementById("cancel-calibration").onclick = () => cancelCalibration();
+      document.getElementById("apply-calibration").onclick = () => applySuggestedCalibration();
+
+      listen("vision_status", (event) => {
+        bumpEvent("vision_status");
+        const s = event.payload;
+        visionStatusEl.textContent = s;
+      });
+
+      listen("tracking_status", (event) => {
+        bumpEvent("tracking_status");
+        const s = event.payload;
+        trackingStatusEl.textContent = s;
+      });
+
+      listen("gesture_debug", (event) => {
+        bumpEvent("gesture_debug");
+        const p = event.payload || {};
+        lastEventEl.textContent = p.type || "gesture";
+        if (calibration.active) {
+          if (p.type === "left_click") calibration.stepClicks.left += 1;
+          if (p.type === "right_click") calibration.stepClicks.right += 1;
+          if (p.type === "control_off") calibration.controlOffCount += 1;
+          evaluateCalibrationStep(latestHint);
+        }
+      });
+
+      listen("gesture_hint", (event) => {
+        bumpEvent("gesture_hint");
+        const p = event.payload || {};
+        latestHint = p;
+        poseHintEl.textContent = p.label || "unknown";
+        const holdPercent = Math.round((p.hold_progress || 0) * 100);
+        hintMeta.textContent =
+          `hold=${holdPercent}% move=${!!p.move_active} open=${!!p.open_palm_pose} two_finger=${!!p.two_finger_pose} closed=${!!p.closed_palm_pose} down=${!!p.hand_down_pose} ` +
+          `pinch(index/middle)=${!!p.pinch_index}/${!!p.pinch_middle} dist(t-i/t-m)=${(p.thumb_index_distance || 0).toFixed(3)}/${(p.thumb_middle_distance || 0).toFixed(3)} ` +
+          `thr=${(p.pinch_index_threshold || 0).toFixed(3)}/${(p.pinch_middle_threshold || 0).toFixed(3)}`;
+        if (calibration.active) {
+          if (p.pinch_index && p.thumb_index_distance) {
+            calibration.pinchIndexSamples.push(p.thumb_index_distance);
+          }
+          if (p.pinch_middle && p.thumb_middle_distance) {
+            calibration.pinchMiddleSamples.push(p.thumb_middle_distance);
+          }
+          if (activeStep()?.id === "click_test") {
+            if (p.pinch_index && !calibration.prevPinchIndex) {
+              calibration.stepClicks.left += 1;
+            }
+            if (p.pinch_middle && !calibration.prevPinchMiddle) {
+              calibration.stepClicks.right += 1;
+            }
+          }
+          calibration.prevPinchIndex = !!p.pinch_index;
+          calibration.prevPinchMiddle = !!p.pinch_middle;
+          evaluateCalibrationStep(p);
+        }
+      });
+
+      listen("health_metrics", (event) => {
+        bumpEvent("health_metrics");
+        const p = event.payload || {};
+        latestHealth = p;
+        healthMeta.textContent =
+          `fps_in=${(p.fps_in || 0).toFixed(1)} fps_out=${(p.fps_out || 0).toFixed(1)} ` +
+          `latency p50/p95=${(p.latency_p50_ms || 0).toFixed(1)}/${(p.latency_p95_ms || 0).toFixed(1)}ms dropped=${p.dropped_frames || 0}`;
+      });
+
+      listen("tracking_frame", (event) => {
+        bumpEvent("tracking_frame");
+        frameCount += 1;
+        const p = event.payload || {};
+        const conf = Number.isFinite(p.confidence) ? p.confidence : 0;
+        if (frameCount % 10 === 0) {
+          frameMeta.textContent = `frame=${p.frame_id} confidence=${conf.toFixed(2)} landmarks=${(p.landmarks || []).length}`;
+        }
+
+        if (!calibration.active) return;
+        calibration.confidenceSamples.push(conf);
+        const idx = p.landmarks && p.landmarks[8] ? p.landmarks[8] : null;
+        if (idx && calibration.prevIndexPoint) {
+          const dx = idx.x - calibration.prevIndexPoint.x;
+          const dy = idx.y - calibration.prevIndexPoint.y;
+          const dist = Math.hypot(dx, dy);
+          if (latestHint.two_finger_pose) {
+            calibration.stepMoveDistance += dist;
+            calibration.movementSamples.push(dist);
+          }
+          if (latestHint.open_palm_pose) {
+            calibration.jitterSamples.push(dist);
+          }
+        }
+        calibration.prevIndexPoint = idx || calibration.prevIndexPoint;
+      });
+
+      listen("camera_preview", (event) => {
+        bumpEvent("camera_preview");
+        previewCount += 1;
+        const p = event.payload || {};
+        if (p.jpeg_base64) {
+          preview.src = `data:image/jpeg;base64,${p.jpeg_base64}`;
+          if (previewCount % 15 === 0) frameMeta.textContent = `camera_preview frame=${p.frame_id}`;
+        }
+      });
+
+      renderCalibrationSteps();
+      setCalibrationStateText();
+      loadSettings();
+      push("Stage 4 UI loaded");
+    </script>
+  </body>
+</html>

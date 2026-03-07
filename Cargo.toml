@@ -1,4 +1,4 @@
 [workspace]
-members = ["tracking-sidecar"]
+members = ["tracking-core", "src-tauri"]
 resolver = "2"
 

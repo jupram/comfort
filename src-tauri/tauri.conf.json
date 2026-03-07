@@ -1,0 +1,36 @@
+{
+  "$schema": "https://schema.tauri.app/config/1",
+  "build": {
+    "beforeBuildCommand": "",
+    "beforeDevCommand": "",
+    "devPath": "../ui",
+    "distDir": "../ui",
+    "withGlobalTauri": true
+  },
+  "package": {
+    "productName": "Gesture Mouse",
+    "version": "0.1.0"
+  },
+  "tauri": {
+    "allowlist": {
+      "all": false
+    },
+    "windows": [
+      {
+        "label": "main",
+        "title": "Gesture Mouse",
+        "width": 900,
+        "height": 640,
+        "resizable": true
+      }
+    ],
+    "bundle": {
+      "active": false,
+      "identifier": "com.comfort.gesturemouse",
+      "icon": []
+    },
+    "systemTray": {
+      "iconPath": "icons/icon.ico"
+    }
+  }
+}

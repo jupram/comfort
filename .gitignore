@@ -1,3 +1,6 @@
-/target/
-**/*.trace.ndjson
+target/
+dist/
+node_modules/
+.tauri/
+*.log
 
