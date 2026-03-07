@@ -1,0 +1,4 @@
+[workspace]
+members = ["tracking-sidecar"]
+resolver = "2"
+
