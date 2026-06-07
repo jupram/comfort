@@ -1,33 +1,25 @@
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Write;
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum VisionBackend {
     Mock,
+    #[default]
     PythonMediapipe,
 }
 
-impl Default for VisionBackend {
-    fn default() -> Self {
-        Self::PythonMediapipe
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CalibrationProfile {
     Comfort,
+    #[default]
     Balanced,
     Responsive,
-}
-
-impl Default for CalibrationProfile {
-    fn default() -> Self {
-        Self::Balanced
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -110,22 +102,58 @@ impl Default for AppSettings {
 
 impl AppSettings {
     pub fn normalize_in_place(&mut self) {
+        const CONFIG_VERSION: u32 = 1;
         const MIN_LOST_TIMEOUT_MS: u64 = 500;
         const DEFAULT_LOST_TIMEOUT_MS: u64 = 700;
+        const MAX_LOST_TIMEOUT_MS: u64 = 10_000;
         const MIN_CONF_GAP: f32 = 0.10;
 
+        self.config_version = CONFIG_VERSION;
+        self.python_executable = self.python_executable.trim().to_string();
+        if self.python_executable.is_empty() {
+            self.python_executable = Self::default().python_executable;
+        }
+        if let Some(path) = self.mediapipe_script_path.as_deref() {
+            let trimmed = path.trim();
+            self.mediapipe_script_path = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+        }
+        self.camera_index = self.camera_index.max(0);
+        self.camera_width = self.camera_width.clamp(160, 3840);
+        self.camera_height = self.camera_height.clamp(120, 2160);
+        self.camera_fps = self.camera_fps.clamp(1, 120);
+
+        self.confidence_lock = clamp_finite(self.confidence_lock, 0.35, 0.95, 0.65);
+        self.confidence_unlock = clamp_finite(self.confidence_unlock, 0.20, 0.90, 0.45);
         if self.lost_timeout_ms < MIN_LOST_TIMEOUT_MS {
             self.lost_timeout_ms = DEFAULT_LOST_TIMEOUT_MS;
         }
+        self.lost_timeout_ms = self.lost_timeout_ms.min(MAX_LOST_TIMEOUT_MS);
 
         if self.confidence_unlock >= self.confidence_lock {
             self.confidence_unlock = (self.confidence_lock - MIN_CONF_GAP).max(0.20);
         }
 
-        self.move_accel = self.move_accel.clamp(0.0, 30.0);
-        self.move_max_delta = self.move_max_delta.clamp(0.01, 0.25);
+        self.min_cutoff = clamp_finite(self.min_cutoff, 0.01, 10.0, 1.0);
+        self.beta = clamp_finite(self.beta, 0.0, 2.0, 0.02);
+        self.d_cutoff = clamp_finite(self.d_cutoff, 0.01, 10.0, 1.0);
+
+        self.pointer_range = clamp_finite(self.pointer_range, 0.5, 3.0, 1.0);
+        self.move_gain = clamp_finite(self.move_gain, 1.0, 15.0, 5.0);
+        self.move_accel = clamp_finite(self.move_accel, 0.0, 30.0, 8.0);
+        self.move_max_delta = clamp_finite(self.move_max_delta, 0.01, 0.25, 0.08);
+        self.deadzone = clamp_finite(self.deadzone, 0.001, 0.08, 0.015);
+        self.hold_to_control_ms = self.hold_to_control_ms.clamp(20, 300);
         self.clutch_enter_ms = self.clutch_enter_ms.clamp(20, 300);
-        self.pointer_range = self.pointer_range.clamp(0.5, 3.0);
+        self.pinch_threshold = clamp_finite(self.pinch_threshold, 0.015, 0.090, 0.035);
+        self.right_pinch_threshold = clamp_finite(self.right_pinch_threshold, 0.015, 0.100, 0.040);
+        self.click_cooldown_ms = self.click_cooldown_ms.clamp(60, 450);
+        self.scroll_mode_threshold = clamp_finite(self.scroll_mode_threshold, 0.015, 0.120, 0.045);
+        self.scroll_gain = clamp_finite(self.scroll_gain, 1.0, 80.0, 28.0);
+        self.scroll_deadzone = clamp_finite(self.scroll_deadzone, 0.0, 5.0, 0.6);
     }
 
     pub fn normalized(mut self) -> Self {
@@ -198,8 +226,66 @@ impl AppSettings {
         }
         let json = serde_json::to_string_pretty(&self.clone().normalized())
             .context("serialize settings JSON")?;
-        fs::write(path, json).with_context(|| format!("write settings {:?}", path))?;
+        write_file_atomically(path, json.as_bytes())
+            .with_context(|| format!("write settings {:?}", path))?;
         Ok(())
+    }
+}
+
+fn write_file_atomically(path: &Path, data: &[u8]) -> anyhow::Result<()> {
+    let tmp_path = temporary_save_path(path)?;
+    let write_result = (|| -> anyhow::Result<()> {
+        {
+            let mut tmp = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp_path)
+                .with_context(|| format!("create temp file {:?}", tmp_path))?;
+            tmp.write_all(data)
+                .with_context(|| format!("write temp file {:?}", tmp_path))?;
+            tmp.sync_all()
+                .with_context(|| format!("sync temp file {:?}", tmp_path))?;
+        }
+        replace_file(&tmp_path, path)?;
+        Ok(())
+    })();
+
+    if write_result.is_err() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+    write_result
+}
+
+fn temporary_save_path(path: &Path) -> anyhow::Result<std::path::PathBuf> {
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("settings path has no file name"))?
+        .to_string_lossy();
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    Ok(path.with_file_name(format!("{file_name}.{}.{}.tmp", std::process::id(), nonce)))
+}
+
+#[cfg(not(windows))]
+fn replace_file(tmp_path: &Path, path: &Path) -> anyhow::Result<()> {
+    fs::rename(tmp_path, path).with_context(|| format!("rename {:?} to {:?}", tmp_path, path))
+}
+
+#[cfg(windows)]
+fn replace_file(tmp_path: &Path, path: &Path) -> anyhow::Result<()> {
+    if path.exists() {
+        fs::remove_file(path).with_context(|| format!("remove existing file {:?}", path))?;
+    }
+    fs::rename(tmp_path, path).with_context(|| format!("rename {:?} to {:?}", tmp_path, path))
+}
+
+fn clamp_finite(value: f32, min: f32, max: f32, default: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(min, max)
+    } else {
+        default
     }
 }
 
@@ -221,6 +307,22 @@ mod tests {
         let out = AppSettings::load_or_default(&path).expect("load");
 
         assert_eq!(input, out);
+        assert_eq!(fs::read_dir(dir.path()).expect("read tempdir").count(), 1);
+    }
+
+    #[test]
+    fn failed_save_removes_temp_file_and_preserves_existing_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        fs::create_dir(&path).expect("create existing directory");
+
+        let err = AppSettings::default()
+            .save(&path)
+            .expect_err("save should fail");
+
+        assert!(err.to_string().contains("write settings"));
+        assert!(path.is_dir());
+        assert_eq!(fs::read_dir(dir.path()).expect("read tempdir").count(), 1);
     }
 
     #[test]
@@ -261,5 +363,66 @@ mod tests {
         fs::write(&path, legacy).expect("write");
         let out = AppSettings::load_or_default(&path).expect("load");
         assert_eq!(out.lost_timeout_ms, 700);
+    }
+
+    #[test]
+    fn normalizes_invalid_runtime_bounds() {
+        let out = AppSettings {
+            config_version: 0,
+            python_executable: "  ".to_string(),
+            mediapipe_script_path: Some(" ".to_string()),
+            camera_index: -10,
+            camera_width: 0,
+            camera_height: 8_000,
+            camera_fps: 0,
+            confidence_lock: f32::NAN,
+            confidence_unlock: 0.99,
+            lost_timeout_ms: 90_000,
+            min_cutoff: f32::INFINITY,
+            beta: -1.0,
+            d_cutoff: 0.0,
+            pointer_range: f32::NAN,
+            move_gain: 0.0,
+            move_accel: 99.0,
+            move_max_delta: 0.0,
+            deadzone: 1.0,
+            hold_to_control_ms: 1,
+            clutch_enter_ms: 1_000,
+            pinch_threshold: f32::NAN,
+            right_pinch_threshold: 99.0,
+            click_cooldown_ms: 1,
+            scroll_mode_threshold: 0.0,
+            scroll_gain: f32::NAN,
+            scroll_deadzone: 99.0,
+            ..AppSettings::default()
+        }
+        .normalized();
+
+        assert_eq!(out.config_version, 1);
+        assert_eq!(out.python_executable, "python");
+        assert_eq!(out.mediapipe_script_path, None);
+        assert_eq!(out.camera_index, 0);
+        assert_eq!(out.camera_width, 160);
+        assert_eq!(out.camera_height, 2160);
+        assert_eq!(out.camera_fps, 1);
+        assert_eq!(out.confidence_lock, 0.65);
+        assert!(out.confidence_unlock < out.confidence_lock);
+        assert_eq!(out.lost_timeout_ms, 10_000);
+        assert_eq!(out.min_cutoff, 1.0);
+        assert_eq!(out.beta, 0.0);
+        assert_eq!(out.d_cutoff, 0.01);
+        assert_eq!(out.pointer_range, 1.0);
+        assert_eq!(out.move_gain, 1.0);
+        assert_eq!(out.move_accel, 30.0);
+        assert_eq!(out.move_max_delta, 0.01);
+        assert_eq!(out.deadzone, 0.08);
+        assert_eq!(out.hold_to_control_ms, 20);
+        assert_eq!(out.clutch_enter_ms, 300);
+        assert_eq!(out.pinch_threshold, 0.035);
+        assert_eq!(out.right_pinch_threshold, 0.100);
+        assert_eq!(out.click_cooldown_ms, 60);
+        assert_eq!(out.scroll_mode_threshold, 0.015);
+        assert_eq!(out.scroll_gain, 28.0);
+        assert_eq!(out.scroll_deadzone, 5.0);
     }
 }

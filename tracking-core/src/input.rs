@@ -3,23 +3,40 @@ use crate::types::ControlIntent;
 use anyhow::Context;
 use tracing::debug;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InputSettings {
+    input_injection_enabled: bool,
+    safe_mode: bool,
+    allow_safe_mode_movement: bool,
+}
+
+impl From<&AppSettings> for InputSettings {
+    fn from(settings: &AppSettings) -> Self {
+        Self {
+            input_injection_enabled: settings.input_injection_enabled,
+            safe_mode: settings.safe_mode,
+            allow_safe_mode_movement: settings.allow_safe_mode_movement,
+        }
+    }
+}
+
 pub struct SafeInputDriver {
-    settings: AppSettings,
+    settings: InputSettings,
     move_remainder_x: f32,
     move_remainder_y: f32,
 }
 
 impl SafeInputDriver {
-    pub fn new(settings: AppSettings) -> Self {
+    pub fn new(settings: &AppSettings) -> Self {
         Self {
-            settings,
+            settings: InputSettings::from(settings),
             move_remainder_x: 0.0,
             move_remainder_y: 0.0,
         }
     }
 
-    pub fn update_settings(&mut self, settings: AppSettings) {
-        self.settings = settings;
+    pub fn update_settings(&mut self, settings: &AppSettings) {
+        self.settings = InputSettings::from(settings);
     }
 
     pub fn apply(&mut self, intent: &ControlIntent) -> anyhow::Result<()> {
@@ -74,6 +91,18 @@ impl SafeInputDriver {
     }
 
     fn map_move_delta(&mut self, dx: f32, dy: f32, full_mode: bool) -> (i32, i32) {
+        if !dx.is_finite() || !dy.is_finite() {
+            self.move_remainder_x = 0.0;
+            self.move_remainder_y = 0.0;
+            return (0, 0);
+        }
+        if !self.move_remainder_x.is_finite() {
+            self.move_remainder_x = 0.0;
+        }
+        if !self.move_remainder_y.is_finite() {
+            self.move_remainder_y = 0.0;
+        }
+
         let speed = (dx * dx + dy * dy).sqrt();
         let (base_scale, accel_scale, cap) = if full_mode {
             (55.0_f32, 380.0_f32, 180_i32)
@@ -106,6 +135,9 @@ impl SafeInputDriver {
 }
 
 fn clamp_scaled(value: f32, scale: f32) -> i32 {
+    if !value.is_finite() || !scale.is_finite() {
+        return 0;
+    }
     let raw = (value * scale).round() as i32;
     raw.clamp(-120, 120)
 }
@@ -116,7 +148,7 @@ mod tests {
 
     #[test]
     fn accumulates_subpixel_motion() {
-        let mut driver = SafeInputDriver::new(AppSettings::default());
+        let mut driver = SafeInputDriver::new(&AppSettings::default());
         let first = driver.map_move_delta(0.003, 0.0, true);
         let second = driver.map_move_delta(0.003, 0.0, true);
         let third = driver.map_move_delta(0.003, 0.0, true);
@@ -127,11 +159,47 @@ mod tests {
 
     #[test]
     fn faster_swipe_produces_larger_delta() {
-        let mut slow_driver = SafeInputDriver::new(AppSettings::default());
-        let mut fast_driver = SafeInputDriver::new(AppSettings::default());
+        let mut slow_driver = SafeInputDriver::new(&AppSettings::default());
+        let mut fast_driver = SafeInputDriver::new(&AppSettings::default());
         let slow = slow_driver.map_move_delta(0.012, 0.0, true).0;
         let fast = fast_driver.map_move_delta(0.045, 0.0, true).0;
         assert!(fast.abs() > slow.abs());
+    }
+
+    #[test]
+    fn non_finite_motion_is_suppressed_and_remainders_reset() {
+        let mut driver = SafeInputDriver::new(&AppSettings::default());
+        driver.move_remainder_x = f32::NAN;
+        driver.move_remainder_y = f32::INFINITY;
+
+        assert_eq!(driver.map_move_delta(f32::NAN, 0.0, true), (0, 0));
+        assert_eq!(driver.move_remainder_x, 0.0);
+        assert_eq!(driver.move_remainder_y, 0.0);
+        assert_eq!(clamp_scaled(f32::NAN, 120.0), 0);
+    }
+
+    #[test]
+    fn input_driver_stores_only_input_policy_settings() {
+        let settings = AppSettings {
+            input_injection_enabled: true,
+            safe_mode: false,
+            allow_safe_mode_movement: true,
+            move_gain: 12.0,
+            ..AppSettings::default()
+        };
+        let mut driver = SafeInputDriver::new(&settings);
+        assert_eq!(driver.settings, InputSettings::from(&settings));
+
+        let next = AppSettings {
+            input_injection_enabled: false,
+            safe_mode: true,
+            allow_safe_mode_movement: false,
+            move_gain: 1.0,
+            ..settings
+        };
+        driver.update_settings(&next);
+
+        assert_eq!(driver.settings, InputSettings::from(&next));
     }
 }
 

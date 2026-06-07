@@ -288,6 +288,9 @@
       let frameCount = 0;
       let previewCount = 0;
       const eventCounts = {};
+      const logLines = [];
+      const maxLogLines = 120;
+      let eventCountsRenderPending = false;
 
       const calibrationSteps = [
         {
@@ -355,13 +358,20 @@
 
       const push = (msg) => {
         const line = `[${new Date().toLocaleTimeString()}] ${msg}`;
-        log.textContent = line + "\n" + log.textContent;
+        logLines.unshift(line);
+        if (logLines.length > maxLogLines) logLines.length = maxLogLines;
+        log.textContent = logLines.join("\n");
       };
 
       const bumpEvent = (name) => {
         eventCounts[name] = (eventCounts[name] || 0) + 1;
-        const pairs = Object.entries(eventCounts).map(([k, v]) => `${k}:${v}`);
-        eventCountsEl.textContent = pairs.join(" | ");
+        if (eventCountsRenderPending) return;
+        eventCountsRenderPending = true;
+        requestAnimationFrame(() => {
+          const pairs = Object.entries(eventCounts).map(([k, v]) => `${k}:${v}`);
+          eventCountsEl.textContent = pairs.join(" | ");
+          eventCountsRenderPending = false;
+        });
       };
 
       const getInvoke = () => {

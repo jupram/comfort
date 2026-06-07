@@ -3,7 +3,7 @@ use crate::types::{ControlIntent, ControlMode, Landmark};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct GestureHintState {
-    pub label: String,
+    pub label: &'static str,
     pub control_mode: ControlMode,
     pub move_active: bool,
     pub two_finger_pose: bool,
@@ -28,7 +28,7 @@ pub struct GestureHintState {
 impl GestureHintState {
     fn no_hand() -> Self {
         Self {
-            label: "no_hand".to_string(),
+            label: "no_hand",
             control_mode: ControlMode::Inactive,
             move_active: false,
             two_finger_pose: false,
@@ -80,6 +80,12 @@ impl FrameSignals {
         right_pinch_threshold: f32,
     ) -> Option<Self> {
         if landmarks.len() < 21 {
+            return None;
+        }
+        if landmarks
+            .iter()
+            .any(|lm| !lm.x.is_finite() || !lm.y.is_finite() || !lm.z.is_finite())
+        {
             return None;
         }
 
@@ -149,9 +155,40 @@ impl FrameSignals {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct GestureSettings {
+    pointer_range: f32,
+    move_gain: f32,
+    move_accel: f32,
+    move_max_delta: f32,
+    deadzone: f32,
+    hold_to_control_ms: u64,
+    clutch_enter_ms: u64,
+    pinch_threshold: f32,
+    right_pinch_threshold: f32,
+    click_cooldown_ms: u64,
+}
+
+impl From<&AppSettings> for GestureSettings {
+    fn from(settings: &AppSettings) -> Self {
+        Self {
+            pointer_range: settings.pointer_range,
+            move_gain: settings.move_gain,
+            move_accel: settings.move_accel,
+            move_max_delta: settings.move_max_delta,
+            deadzone: settings.deadzone,
+            hold_to_control_ms: settings.hold_to_control_ms,
+            clutch_enter_ms: settings.clutch_enter_ms,
+            pinch_threshold: settings.pinch_threshold,
+            right_pinch_threshold: settings.right_pinch_threshold,
+            click_cooldown_ms: settings.click_cooldown_ms,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct GestureEngine {
-    settings: AppSettings,
+    settings: GestureSettings,
     arm_pose_since_ms: Option<u64>,
     clutch_pose_since_ms: Option<u64>,
     unclutch_pose_since_ms: Option<u64>,
@@ -165,9 +202,9 @@ pub struct GestureEngine {
 }
 
 impl GestureEngine {
-    pub fn new(settings: AppSettings) -> Self {
+    pub fn new(settings: &AppSettings) -> Self {
         Self {
-            settings,
+            settings: GestureSettings::from(settings),
             arm_pose_since_ms: None,
             clutch_pose_since_ms: None,
             unclutch_pose_since_ms: None,
@@ -181,8 +218,8 @@ impl GestureEngine {
         }
     }
 
-    pub fn update_settings(&mut self, settings: AppSettings) {
-        self.settings = settings;
+    pub fn update_settings(&mut self, settings: &AppSettings) {
+        self.settings = GestureSettings::from(settings);
     }
 
     pub fn hint(&self, ts_ms: u64, landmarks: &[Landmark]) -> GestureHintState {
@@ -246,7 +283,7 @@ impl GestureEngine {
         };
 
         GestureHintState {
-            label: label.to_string(),
+            label,
             control_mode: self.control_mode,
             move_active: self.control_mode != ControlMode::Inactive,
             two_finger_pose: signals.two_finger_pose,
@@ -269,7 +306,13 @@ impl GestureEngine {
         }
     }
 
-    pub fn reset_on_lost(&mut self, _ts_ms: u64) -> Vec<ControlIntent> {
+    pub fn reset_on_lost(&mut self, ts_ms: u64) -> Vec<ControlIntent> {
+        let mut intents = Vec::with_capacity(1);
+        self.reset_on_lost_into(ts_ms, &mut intents);
+        intents
+    }
+
+    pub fn reset_on_lost_into(&mut self, _ts_ms: u64, intents: &mut Vec<ControlIntent>) {
         self.arm_pose_since_ms = None;
         self.clutch_pose_since_ms = None;
         self.unclutch_pose_since_ms = None;
@@ -280,22 +323,30 @@ impl GestureEngine {
 
         if self.control_mode != ControlMode::Inactive {
             self.control_mode = ControlMode::Inactive;
-            vec![ControlIntent::ControlOff]
-        } else {
-            Vec::new()
+            intents.push(ControlIntent::ControlOff);
         }
     }
 
     pub fn process(&mut self, ts_ms: u64, landmarks: &[Landmark]) -> Vec<ControlIntent> {
+        let mut intents = Vec::with_capacity(2);
+        self.process_into(ts_ms, landmarks, &mut intents);
+        intents
+    }
+
+    pub fn process_into(
+        &mut self,
+        ts_ms: u64,
+        landmarks: &[Landmark],
+        intents: &mut Vec<ControlIntent>,
+    ) {
         let Some(signals) = FrameSignals::from_landmarks(
             landmarks,
             self.settings.pinch_threshold,
             self.settings.right_pinch_threshold,
         ) else {
-            return Vec::new();
+            return;
         };
 
-        let mut intents = Vec::new();
         let start_pose = signals.open_palm_pose;
         let move_pose = signals.two_finger_pose;
         let stop_pose = signals.closed_palm_pose;
@@ -324,7 +375,7 @@ impl GestureEngine {
             self.stop_pose_since_ms = None;
             self.left_click_pose_prev = left_click_pose;
             self.right_click_pose_prev = right_click_pose;
-            return intents;
+            return;
         }
 
         self.arm_pose_since_ms = None;
@@ -340,7 +391,7 @@ impl GestureEngine {
             }
             self.left_click_pose_prev = left_click_pose;
             self.right_click_pose_prev = right_click_pose;
-            return intents;
+            return;
         }
         self.stop_pose_since_ms = None;
 
@@ -355,7 +406,7 @@ impl GestureEngine {
             }
             self.right_click_pose_prev = right_click_pose;
             self.left_click_pose_prev = left_click_pose;
-            return intents;
+            return;
         }
 
         if self.control_mode == ControlMode::Move {
@@ -375,7 +426,7 @@ impl GestureEngine {
                     intents.push(ControlIntent::ClutchOff);
                     self.left_click_pose_prev = false;
                     self.right_click_pose_prev = false;
-                    return intents;
+                    return;
                 }
             } else {
                 self.unclutch_pose_since_ms = None;
@@ -405,7 +456,7 @@ impl GestureEngine {
             self.prev_cursor_point = None;
             self.left_click_pose_prev = left_click_pose;
             self.right_click_pose_prev = right_click_pose;
-            return intents;
+            return;
         }
 
         if move_pose {
@@ -438,7 +489,6 @@ impl GestureEngine {
 
         self.left_click_pose_prev = left_click_pose;
         self.right_click_pose_prev = right_click_pose;
-        intents
     }
 }
 
@@ -652,7 +702,7 @@ mod tests {
 
     #[test]
     fn open_palm_hold_enables_control() {
-        let mut g = GestureEngine::new(AppSettings::default());
+        let mut g = GestureEngine::new(&AppSettings::default());
         let lm = open_palm_hand();
         assert!(g.process(0, &lm).is_empty());
         let out = g.process(100, &lm);
@@ -660,8 +710,26 @@ mod tests {
     }
 
     #[test]
+    fn process_into_reuses_caller_buffer() {
+        let mut g = GestureEngine::new(&AppSettings::default());
+        let lm = open_palm_hand();
+        let mut out = Vec::with_capacity(2);
+        let ptr = out.as_ptr();
+
+        g.process_into(0, &lm, &mut out);
+        assert!(out.is_empty());
+        assert_eq!(out.as_ptr(), ptr);
+
+        g.process_into(100, &lm, &mut out);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out.as_ptr(), ptr);
+        assert!(out.iter().any(|i| matches!(i, ControlIntent::ControlOn)));
+        assert!(out.iter().any(|i| matches!(i, ControlIntent::ClutchOn)));
+    }
+
+    #[test]
     fn two_finger_does_not_start_control_by_itself() {
-        let mut g = GestureEngine::new(AppSettings::default());
+        let mut g = GestureEngine::new(&AppSettings::default());
         let lm = two_finger_hand();
         let _ = g.process(0, &lm);
         let out = g.process(120, &lm);
@@ -669,8 +737,27 @@ mod tests {
     }
 
     #[test]
+    fn non_finite_landmarks_are_ignored() {
+        let mut g = GestureEngine::new(&AppSettings::default());
+        let mut lm = open_palm_hand();
+        lm[8].x = f32::NAN;
+
+        assert!(g.process(100, &lm).is_empty());
+        assert_eq!(g.hint(100, &lm), GestureHintState::no_hand());
+    }
+
+    #[test]
+    fn hint_labels_are_static_strings() {
+        fn require_static(_: &'static str) {}
+
+        let g = GestureEngine::new(&AppSettings::default());
+        require_static(GestureHintState::no_hand().label);
+        require_static(g.hint(100, &open_palm_hand()).label);
+    }
+
+    #[test]
     fn index_pinch_generates_left_click() {
-        let mut g = GestureEngine::new(AppSettings::default());
+        let mut g = GestureEngine::new(&AppSettings::default());
         let lm_open = open_palm_hand();
         let _ = g.process(0, &lm_open);
         let _ = g.process(100, &lm_open); // control_on + clutch_on
@@ -688,7 +775,7 @@ mod tests {
 
     #[test]
     fn middle_pinch_generates_right_click() {
-        let mut g = GestureEngine::new(AppSettings::default());
+        let mut g = GestureEngine::new(&AppSettings::default());
         let lm_open = open_palm_hand();
         let _ = g.process(0, &lm_open);
         let _ = g.process(100, &lm_open); // control_on + clutch_on
@@ -706,7 +793,7 @@ mod tests {
 
     #[test]
     fn two_finger_slide_generates_cursor_move() {
-        let mut g = GestureEngine::new(AppSettings::default());
+        let mut g = GestureEngine::new(&AppSettings::default());
         let mut lm = open_palm_hand();
         let _ = g.process(0, &lm);
         let _ = g.process(100, &lm);
@@ -727,7 +814,7 @@ mod tests {
 
     #[test]
     fn closed_palm_stops_control() {
-        let mut g = GestureEngine::new(AppSettings::default());
+        let mut g = GestureEngine::new(&AppSettings::default());
         let lm_open = open_palm_hand();
         let _ = g.process(0, &lm_open);
         let out_on = g.process(100, &lm_open);
@@ -742,7 +829,7 @@ mod tests {
 
     #[test]
     fn brief_closed_palm_does_not_stop_control() {
-        let mut g = GestureEngine::new(AppSettings::default());
+        let mut g = GestureEngine::new(&AppSettings::default());
         let lm_open = open_palm_hand();
         let _ = g.process(0, &lm_open);
         let out_on = g.process(100, &lm_open);
@@ -755,7 +842,7 @@ mod tests {
 
     #[test]
     fn hand_down_without_fist_does_not_stop_control() {
-        let mut g = GestureEngine::new(AppSettings::default());
+        let mut g = GestureEngine::new(&AppSettings::default());
         let lm_open = open_palm_hand();
         let _ = g.process(0, &lm_open);
         let out_on = g.process(100, &lm_open);
@@ -768,7 +855,7 @@ mod tests {
 
     #[test]
     fn hint_reports_arming_and_motion_state() {
-        let mut g = GestureEngine::new(AppSettings::default());
+        let mut g = GestureEngine::new(&AppSettings::default());
         let lm = open_palm_hand();
         let _ = g.process(0, &lm);
         let h = g.hint(30, &lm);
@@ -786,7 +873,7 @@ mod tests {
 
     #[test]
     fn relaxed_open_palm_with_three_fingers_does_not_start_control() {
-        let mut g = GestureEngine::new(AppSettings::default());
+        let mut g = GestureEngine::new(&AppSettings::default());
         let mut lm = open_palm_hand();
         // Pinky bent means this is no longer a valid full-palm clutch/start pose.
         lm[18] = Landmark {
@@ -806,7 +893,7 @@ mod tests {
 
     #[test]
     fn open_palm_while_active_enters_clutch_and_resumes_on_move() {
-        let mut g = GestureEngine::new(AppSettings::default());
+        let mut g = GestureEngine::new(&AppSettings::default());
         let lm_open = open_palm_hand();
         let _ = g.process(0, &lm_open);
         let out_on = g.process(100, &lm_open);
@@ -840,7 +927,7 @@ mod tests {
 
     #[test]
     fn move_mode_blocks_clicks() {
-        let mut g = GestureEngine::new(AppSettings::default());
+        let mut g = GestureEngine::new(&AppSettings::default());
         let lm_open = open_palm_hand();
         let _ = g.process(0, &lm_open);
         let _ = g.process(100, &lm_open); // control_on + clutch_on
@@ -861,7 +948,7 @@ mod tests {
 
     #[test]
     fn clutch_does_not_exit_during_pinch_attempt() {
-        let mut g = GestureEngine::new(AppSettings::default());
+        let mut g = GestureEngine::new(&AppSettings::default());
         let lm_open = open_palm_hand();
         let _ = g.process(0, &lm_open);
         let _ = g.process(100, &lm_open); // control_on + clutch_on
@@ -889,13 +976,17 @@ mod tests {
 
     #[test]
     fn pointer_range_scales_move_delta() {
-        let mut base = AppSettings::default();
-        base.pointer_range = 1.0;
-        let mut fast = AppSettings::default();
-        fast.pointer_range = 2.0;
+        let base = AppSettings {
+            pointer_range: 1.0,
+            ..AppSettings::default()
+        };
+        let fast = AppSettings {
+            pointer_range: 2.0,
+            ..AppSettings::default()
+        };
 
-        let mut g1 = GestureEngine::new(base);
-        let mut g2 = GestureEngine::new(fast);
+        let mut g1 = GestureEngine::new(&base);
+        let mut g2 = GestureEngine::new(&fast);
         let lm_open = open_palm_hand();
         let lm_move = two_finger_hand();
 
@@ -930,5 +1021,36 @@ mod tests {
             })
             .unwrap_or(0.0);
         assert!(dx2 > dx1);
+    }
+
+    #[test]
+    fn gesture_engine_stores_only_gesture_settings() {
+        let settings = AppSettings {
+            pointer_range: 1.25,
+            move_gain: 6.0,
+            input_injection_enabled: true,
+            diagnostics_enabled: false,
+            ..AppSettings::default()
+        };
+        let mut engine = GestureEngine::new(&settings);
+        let initial = engine.settings;
+        assert_eq!(initial, GestureSettings::from(&settings));
+
+        let non_gesture_change = AppSettings {
+            input_injection_enabled: !settings.input_injection_enabled,
+            diagnostics_enabled: !settings.diagnostics_enabled,
+            camera_width: settings.camera_width + 16,
+            ..settings.clone()
+        };
+        engine.update_settings(&non_gesture_change);
+        assert_eq!(engine.settings, initial);
+
+        let gesture_change = AppSettings {
+            move_gain: settings.move_gain + 1.0,
+            ..settings
+        };
+        engine.update_settings(&gesture_change);
+        assert_eq!(engine.settings, GestureSettings::from(&gesture_change));
+        assert_ne!(engine.settings, initial);
     }
 }
