@@ -2,13 +2,13 @@
 import argparse
 import base64
 import json
-import os
+import math
 import sys
 import time
 import urllib.request
+from pathlib import Path
 
 import cv2
-import mediapipe as mp
 
 HAND_CONNECTIONS = [
     (0, 1), (1, 2), (2, 3), (3, 4),
@@ -19,10 +19,37 @@ HAND_CONNECTIONS = [
     (0, 17),
 ]
 
+MODEL_DOWNLOAD_TIMEOUT_S = 30
+MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/"
+    "hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task"
+)
+
 
 def emit(payload):
-    sys.stdout.write(json.dumps(payload, separators=(",", ":")) + "\n")
+    sys.stdout.write(json.dumps(payload, separators=(",", ":"), allow_nan=False) + "\n")
     sys.stdout.flush()
+
+
+def clamp(value, low, high):
+    return max(low, min(high, value))
+
+
+def finite_float(value, default=0.0):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return default
+    return value if math.isfinite(value) else default
+
+
+def sanitize_landmark(point):
+    return {
+        "x": clamp(finite_float(point.x), 0.0, 1.0),
+        "y": clamp(finite_float(point.y), 0.0, 1.0),
+        "z": clamp(finite_float(point.z), -1.0, 1.0),
+    }
+
 
 def draw_landmarks_on_frame(frame, landmarks):
     h, w = frame.shape[:2]
@@ -50,6 +77,33 @@ def make_preview_jpeg_b64(frame, max_width=640):
     return base64.b64encode(encoded).decode("ascii")
 
 
+def ensure_model(model_path):
+    path = Path(model_path)
+    if path.is_file() and path.stat().st_size > 0:
+        return str(path)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.unlink(missing_ok=True)
+    print(f"downloading model: {MODEL_URL}", file=sys.stderr, flush=True)
+    try:
+        with urllib.request.urlopen(MODEL_URL, timeout=MODEL_DOWNLOAD_TIMEOUT_S) as response:
+            with tmp_path.open("wb") as out:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+        if not tmp_path.is_file() or tmp_path.stat().st_size == 0:
+            raise RuntimeError("downloaded model is empty")
+        tmp_path.replace(path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    print(f"model saved: {path}", file=sys.stderr, flush=True)
+    return str(path)
+
+
 def main():
     parser = argparse.ArgumentParser(description="MediaPipe hand tracker NDJSON sidecar")
     parser.add_argument("--camera-index", type=int, default=0)
@@ -64,6 +118,11 @@ def main():
         help="Path to MediaPipe hand landmarker .task model",
     )
     args = parser.parse_args()
+    args.camera_index = max(args.camera_index, 0)
+    args.width = clamp(args.width, 160, 3840)
+    args.height = clamp(args.height, 120, 2160)
+    args.fps = clamp(args.fps, 1, 120)
+    args.preview_every = max(args.preview_every, 0)
 
     backend_candidates = [
         ("MSMF", cv2.CAP_MSMF),
@@ -90,40 +149,32 @@ def main():
         return 1
     print(f"camera opened: index={args.camera_index} backend={opened_backend}", file=sys.stderr, flush=True)
 
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
-    cap.set(cv2.CAP_PROP_FPS, args.fps)
-
-    model_path = args.model_path
-    if not os.path.exists(model_path):
-        model_dir = os.path.dirname(model_path)
-        if model_dir:
-            os.makedirs(model_dir, exist_ok=True)
-        model_url = (
-            "https://storage.googleapis.com/mediapipe-models/"
-            "hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task"
-        )
-        print(f"downloading model: {model_url}", file=sys.stderr, flush=True)
-        urllib.request.urlretrieve(model_url, model_path)
-        print(f"model saved: {model_path}", file=sys.stderr, flush=True)
-
-    from mediapipe.tasks import python as mp_python
-    from mediapipe.tasks.python import vision
-
-    base_options = mp_python.BaseOptions(model_asset_path=model_path)
-    options = vision.HandLandmarkerOptions(
-        base_options=base_options,
-        running_mode=vision.RunningMode.IMAGE,
-        num_hands=1,
-        min_hand_detection_confidence=0.5,
-        min_tracking_confidence=0.5,
-    )
-    hand_landmarker = vision.HandLandmarker.create_from_options(options)
-
-    frame_id = 0
-    frame_sleep = 1.0 / max(args.fps, 1)
-
+    hand_landmarker = None
     try:
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
+        cap.set(cv2.CAP_PROP_FPS, args.fps)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+        model_path = ensure_model(args.model_path)
+
+        import mediapipe as mp
+        from mediapipe.tasks import python as mp_python
+        from mediapipe.tasks.python import vision
+
+        base_options = mp_python.BaseOptions(model_asset_path=model_path)
+        options = vision.HandLandmarkerOptions(
+            base_options=base_options,
+            running_mode=vision.RunningMode.IMAGE,
+            num_hands=1,
+            min_hand_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
+        )
+        hand_landmarker = vision.HandLandmarker.create_from_options(options)
+
+        frame_id = 0
+        frame_sleep = 1.0 / max(args.fps, 1)
+
         while True:
             ok, frame = cap.read()
             ts_ms = int(time.time() * 1000)
@@ -149,9 +200,11 @@ def main():
             landmarks = []
             if results.hand_landmarks:
                 hand = results.hand_landmarks[0]
-                landmarks = [{"x": p.x, "y": p.y, "z": p.z} for p in hand]
+                landmarks = [sanitize_landmark(p) for p in hand]
+                if len(landmarks) != 21:
+                    landmarks = []
                 if results.handedness and len(results.handedness) > 0:
-                    confidence = float(results.handedness[0][0].score)
+                    confidence = clamp(finite_float(results.handedness[0][0].score), 0.0, 1.0)
                 else:
                     confidence = 1.0
 
@@ -187,7 +240,8 @@ def main():
         pass
     finally:
         cap.release()
-        hand_landmarker.close()
+        if hand_landmarker is not None:
+            hand_landmarker.close()
     return 0
 
 

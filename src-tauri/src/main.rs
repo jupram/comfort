@@ -8,13 +8,13 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Mutex;
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{
     CustomMenuItem, Manager, State, SystemTray, SystemTrayEvent, SystemTrayMenu, SystemTrayMenuItem,
 };
 use tracing::{error, info, warn};
 use tracking_core::config::{AppSettings, CalibrationProfile};
-use tracking_core::engine::{RuntimeEngine, WarmupState};
+use tracking_core::engine::RuntimeEngine;
 use tracking_core::input::SafeInputDriver;
 use tracking_core::types::{
     CameraPreview, ControlIntent, GestureHint, RuntimeEvent, TrackingFrame, TrackingStatus,
@@ -28,6 +28,125 @@ enum RuntimeCommand {
     Pause,
     Resume,
     UpdateSettings(AppSettings),
+}
+
+fn coalesce_runtime_command(
+    rx: &Receiver<RuntimeCommand>,
+    cmd: RuntimeCommand,
+) -> (RuntimeCommand, Option<RuntimeCommand>, usize) {
+    let RuntimeCommand::UpdateSettings(mut latest) = cmd else {
+        return (cmd, None, 0);
+    };
+
+    let mut coalesced = 0;
+    while let Ok(next) = rx.try_recv() {
+        match next {
+            RuntimeCommand::UpdateSettings(settings) => {
+                latest = settings;
+                coalesced += 1;
+            }
+            other => {
+                return (
+                    RuntimeCommand::UpdateSettings(latest),
+                    Some(other),
+                    coalesced,
+                )
+            }
+        }
+    }
+
+    (RuntimeCommand::UpdateSettings(latest), None, coalesced)
+}
+
+fn runtime_frame_period(camera_fps: u32) -> Duration {
+    Duration::from_nanos(1_000_000_000 / camera_fps.max(1) as u64)
+}
+
+fn runtime_sleep_duration(camera_fps: u32, elapsed: Duration) -> Duration {
+    runtime_frame_period(camera_fps).saturating_sub(elapsed)
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct RuntimeSessionState {
+    running: bool,
+    paused: bool,
+    vision_ready: bool,
+    ready_announced: bool,
+}
+
+impl RuntimeSessionState {
+    fn start(&mut self) -> StartDecision {
+        self.running = true;
+        self.paused = false;
+        if self.vision_ready {
+            self.ready_announced = true;
+            StartDecision::AlreadyReady
+        } else {
+            StartDecision::NeedsLoading
+        }
+    }
+
+    fn stop(&mut self) {
+        self.running = false;
+        self.paused = false;
+        self.vision_ready = false;
+        self.ready_announced = false;
+    }
+
+    fn pause(&mut self) -> bool {
+        if !self.running {
+            return false;
+        }
+        self.paused = true;
+        true
+    }
+
+    fn resume(&mut self) -> ResumeDecision {
+        if !self.running {
+            return ResumeDecision {
+                accepted: false,
+                announce_ready: false,
+            };
+        }
+        self.paused = false;
+        let announce_ready = self.vision_ready && !self.ready_announced;
+        if announce_ready {
+            self.ready_announced = true;
+        }
+        ResumeDecision {
+            accepted: true,
+            announce_ready,
+        }
+    }
+
+    fn apply_tracker_settings_change(&mut self, tracker_changed: bool) -> bool {
+        if tracker_changed {
+            self.vision_ready = false;
+            self.ready_announced = false;
+        }
+        self.running && tracker_changed
+    }
+
+    fn mark_vision_ready(&mut self) -> bool {
+        self.vision_ready = true;
+        if self.ready_announced {
+            return false;
+        }
+        self.ready_announced = true;
+        true
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartDecision {
+    AlreadyReady,
+    NeedsLoading,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResumeDecision {
+    accepted: bool,
+    announce_ready: bool,
 }
 
 struct AppState {
@@ -48,9 +167,12 @@ impl AppState {
 
 struct EventDumpWriter {
     writer: BufWriter<File>,
+    pending_lines: usize,
 }
 
 impl EventDumpWriter {
+    const FLUSH_EVERY_LINES: usize = 32;
+
     fn new() -> Option<Self> {
         let path = event_dump_path();
         if let Some(parent) = path.parent() {
@@ -64,6 +186,7 @@ impl EventDumpWriter {
                 info!("runtime event dump enabled: {}", path.display());
                 Some(Self {
                     writer: BufWriter::new(file),
+                    pending_lines: 0,
                 })
             }
             Err(e) => {
@@ -87,15 +210,77 @@ impl EventDumpWriter {
             Ok(s) => {
                 if self.writer.write_all(s.as_bytes()).is_err()
                     || self.writer.write_all(b"\n").is_err()
-                    || self.writer.flush().is_err()
                 {
                     error!("event dump write failed");
+                    return;
+                }
+                self.pending_lines += 1;
+                if self.pending_lines >= Self::FLUSH_EVERY_LINES {
+                    self.flush();
                 }
             }
             Err(e) => {
                 error!("event dump serialization failed: {e}");
             }
         }
+    }
+
+    fn flush(&mut self) {
+        if self.pending_lines == 0 {
+            return;
+        }
+        if self.writer.flush().is_err() {
+            error!("event dump flush failed");
+        }
+        self.pending_lines = 0;
+    }
+}
+
+impl Drop for EventDumpWriter {
+    fn drop(&mut self) {
+        self.flush();
+    }
+}
+
+fn event_dump_mut<'a>(
+    event_dump: &'a mut Option<EventDumpWriter>,
+    settings: &AppSettings,
+) -> Option<&'a mut EventDumpWriter> {
+    if !settings.diagnostics_enabled {
+        return None;
+    }
+    if event_dump.is_none() {
+        *event_dump = EventDumpWriter::new();
+    }
+    event_dump.as_mut()
+}
+
+fn disable_event_dump_writer(event_dump: &mut Option<EventDumpWriter>) {
+    if event_dump.take().is_some() {
+        info!("runtime event dump disabled");
+    }
+}
+
+fn write_event_dump_payload<T: Serialize>(
+    event_dump: &mut Option<EventDumpWriter>,
+    settings: &AppSettings,
+    event: &str,
+    payload: &T,
+) {
+    if let Some(dump) = event_dump_mut(event_dump, settings) {
+        dump.write_payload(event, payload);
+    }
+}
+
+fn write_event_dump_line_lazy<F>(
+    event_dump: &mut Option<EventDumpWriter>,
+    settings: &AppSettings,
+    build_line: F,
+) where
+    F: FnOnce() -> serde_json::Value,
+{
+    if let Some(dump) = event_dump_mut(event_dump, settings) {
+        dump.write_line(build_line());
     }
 }
 
@@ -161,28 +346,28 @@ impl Default for CalibrationRequest {
     }
 }
 
-#[tauri::command]
-fn start_tracking(state: State<AppState>) -> Result<(), String> {
-    state.send(RuntimeCommand::Start)
+impl From<&AppSettings> for CalibrationResult {
+    fn from(cfg: &AppSettings) -> Self {
+        Self {
+            profile: cfg.calibration_profile,
+            pointer_range: cfg.pointer_range,
+            move_gain: cfg.move_gain,
+            move_accel: cfg.move_accel,
+            move_max_delta: cfg.move_max_delta,
+            deadzone: cfg.deadzone,
+            hold_to_control_ms: cfg.hold_to_control_ms,
+            clutch_enter_ms: cfg.clutch_enter_ms,
+            pinch_threshold: cfg.pinch_threshold,
+            right_pinch_threshold: cfg.right_pinch_threshold,
+            click_cooldown_ms: cfg.click_cooldown_ms,
+            confidence_lock: cfg.confidence_lock,
+            confidence_unlock: cfg.confidence_unlock,
+            calibrated_at_ms: cfg.calibrated_at_ms,
+        }
+    }
 }
 
-#[tauri::command]
-fn stop_tracking(state: State<AppState>) -> Result<(), String> {
-    state.send(RuntimeCommand::Stop)
-}
-
-#[tauri::command]
-fn pause_tracking(state: State<AppState>) -> Result<(), String> {
-    state.send(RuntimeCommand::Pause)
-}
-
-#[tauri::command]
-fn resume_tracking(state: State<AppState>) -> Result<(), String> {
-    state.send(RuntimeCommand::Resume)
-}
-
-#[tauri::command]
-fn load_settings(state: State<AppState>) -> Result<AppSettings, String> {
+fn current_settings(state: &AppState) -> Result<AppSettings, String> {
     state
         .settings
         .lock()
@@ -190,12 +375,15 @@ fn load_settings(state: State<AppState>) -> Result<AppSettings, String> {
         .map_err(|_| "settings lock poisoned".to_string())
 }
 
-#[tauri::command]
-fn save_settings(state: State<AppState>, settings: AppSettings) -> Result<(), String> {
+fn persist_settings(
+    state: &AppState,
+    settings: AppSettings,
+    error_context: &str,
+) -> Result<AppSettings, String> {
     let settings = settings.normalized();
     settings
         .save(&state.settings_path)
-        .map_err(|e| format!("save settings failed: {e}"))?;
+        .map_err(|e| format!("{error_context}: {e}"))?;
     {
         let mut guard = state
             .settings
@@ -203,36 +391,15 @@ fn save_settings(state: State<AppState>, settings: AppSettings) -> Result<(), St
             .map_err(|_| "settings lock poisoned".to_string())?;
         *guard = settings.clone();
     }
-    state.send(RuntimeCommand::UpdateSettings(settings))
+    state.send(RuntimeCommand::UpdateSettings(settings.clone()))?;
+    Ok(settings)
 }
 
-#[tauri::command]
-fn reset_settings(state: State<AppState>) -> Result<AppSettings, String> {
-    let cfg = AppSettings::default().normalized();
-    cfg.save(&state.settings_path)
-        .map_err(|e| format!("reset settings failed: {e}"))?;
-    {
-        let mut guard = state
-            .settings
-            .lock()
-            .map_err(|_| "settings lock poisoned".to_string())?;
-        *guard = cfg.clone();
-    }
-    state.send(RuntimeCommand::UpdateSettings(cfg.clone()))?;
-    Ok(cfg)
-}
-
-#[tauri::command]
-fn run_calibration(
-    state: State<AppState>,
-    request: Option<CalibrationRequest>,
-) -> Result<CalibrationResult, String> {
-    let req = request.unwrap_or_default();
-    let mut cfg = state
-        .settings
-        .lock()
-        .map_err(|_| "settings lock poisoned".to_string())?
-        .clone();
+fn build_calibrated_settings(
+    mut cfg: AppSettings,
+    req: CalibrationRequest,
+    calibrated_at_ms: u64,
+) -> AppSettings {
     cfg.apply_calibration_profile(req.profile);
     if let Some(v) = req.pointer_range {
         cfg.pointer_range = v.clamp(0.5, 3.0);
@@ -280,34 +447,58 @@ fn run_calibration(
     if let Some(v) = req.allow_safe_mode_movement {
         cfg.allow_safe_mode_movement = v;
     }
-    cfg.calibrated_at_ms = Some(now_ms());
+    cfg.calibrated_at_ms = Some(calibrated_at_ms);
+    cfg
+}
 
-    cfg.save(&state.settings_path)
-        .map_err(|e| format!("save calibration failed: {e}"))?;
-    {
-        let mut guard = state
-            .settings
-            .lock()
-            .map_err(|_| "settings lock poisoned".to_string())?;
-        *guard = cfg.clone();
-    }
-    state.send(RuntimeCommand::UpdateSettings(cfg.clone()))?;
-    Ok(CalibrationResult {
-        profile: cfg.calibration_profile,
-        pointer_range: cfg.pointer_range,
-        move_gain: cfg.move_gain,
-        move_accel: cfg.move_accel,
-        move_max_delta: cfg.move_max_delta,
-        deadzone: cfg.deadzone,
-        hold_to_control_ms: cfg.hold_to_control_ms,
-        clutch_enter_ms: cfg.clutch_enter_ms,
-        pinch_threshold: cfg.pinch_threshold,
-        right_pinch_threshold: cfg.right_pinch_threshold,
-        click_cooldown_ms: cfg.click_cooldown_ms,
-        confidence_lock: cfg.confidence_lock,
-        confidence_unlock: cfg.confidence_unlock,
-        calibrated_at_ms: cfg.calibrated_at_ms,
-    })
+#[tauri::command]
+fn start_tracking(state: State<AppState>) -> Result<(), String> {
+    state.send(RuntimeCommand::Start)
+}
+
+#[tauri::command]
+fn stop_tracking(state: State<AppState>) -> Result<(), String> {
+    state.send(RuntimeCommand::Stop)
+}
+
+#[tauri::command]
+fn pause_tracking(state: State<AppState>) -> Result<(), String> {
+    state.send(RuntimeCommand::Pause)
+}
+
+#[tauri::command]
+fn resume_tracking(state: State<AppState>) -> Result<(), String> {
+    state.send(RuntimeCommand::Resume)
+}
+
+#[tauri::command]
+fn load_settings(state: State<AppState>) -> Result<AppSettings, String> {
+    current_settings(&state)
+}
+
+#[tauri::command]
+fn save_settings(state: State<AppState>, settings: AppSettings) -> Result<(), String> {
+    persist_settings(&state, settings, "save settings failed").map(|_| ())
+}
+
+#[tauri::command]
+fn reset_settings(state: State<AppState>) -> Result<AppSettings, String> {
+    persist_settings(
+        &state,
+        AppSettings::default().normalized(),
+        "reset settings failed",
+    )
+}
+
+#[tauri::command]
+fn run_calibration(
+    state: State<AppState>,
+    request: Option<CalibrationRequest>,
+) -> Result<CalibrationResult, String> {
+    let req = request.unwrap_or_default();
+    let cfg = build_calibrated_settings(current_settings(&state)?, req, now_ms());
+    persist_settings(&state, cfg, "save calibration failed")
+        .map(|cfg| CalibrationResult::from(&cfg))
 }
 
 fn main() {
@@ -400,93 +591,101 @@ fn handle_system_tray_event(app: &tauri::AppHandle, event: SystemTrayEvent) {
 fn spawn_runtime_thread(app: tauri::AppHandle, initial: AppSettings) -> Sender<RuntimeCommand> {
     let (tx, rx): (Sender<RuntimeCommand>, Receiver<RuntimeCommand>) = mpsc::channel();
     thread::spawn(move || {
-        let mut event_dump = EventDumpWriter::new();
         let mut settings = initial;
+        let mut event_dump = None;
         let mut engine = RuntimeEngine::new(settings.clone());
-        let mut input = SafeInputDriver::new(settings.clone());
-        let mut running = false;
-        let mut paused = false;
-        let mut vision_ready = false;
-        let mut ready_announced = false;
+        let mut input = SafeInputDriver::new(&settings);
+        let mut session = RuntimeSessionState::default();
+        let mut pending_cmd = None;
 
         loop {
-            while let Ok(cmd) = rx.try_recv() {
+            let frame_started = Instant::now();
+            while let Some(raw_cmd) = pending_cmd.take().or_else(|| rx.try_recv().ok()) {
+                let (cmd, next_pending, coalesced_settings) =
+                    coalesce_runtime_command(&rx, raw_cmd);
+                pending_cmd = next_pending;
+                if coalesced_settings > 0 {
+                    info!("coalesced {coalesced_settings} queued runtime settings update(s)");
+                }
                 match cmd {
                     RuntimeCommand::Start => {
-                        running = true;
-                        paused = false;
-                        if let Some(dump) = event_dump.as_mut() {
-                            dump.write_line(json!({
+                        let start = session.start();
+                        write_event_dump_line_lazy(&mut event_dump, &settings, || {
+                            json!({
                                 "ts_ms": now_ms(),
                                 "event": "runtime_start",
                                 "payload": { "running": true, "paused": false }
-                            }));
-                        }
+                            })
+                        });
                         emit_vision(&app, VisionStatus::Running);
-                        if vision_ready {
-                            emit_vision(&app, VisionStatus::Ready);
-                            ready_announced = true;
-                        } else {
-                            emit_vision(&app, VisionStatus::LoadingModel);
-                            emit_vision(&app, VisionStatus::LoadingCamera);
+                        match start {
+                            StartDecision::AlreadyReady => emit_vision(&app, VisionStatus::Ready),
+                            StartDecision::NeedsLoading => {
+                                emit_vision(&app, VisionStatus::LoadingModel);
+                                emit_vision(&app, VisionStatus::LoadingCamera);
+                            }
                         }
                         info!("runtime started");
                     }
                     RuntimeCommand::Stop => {
-                        running = false;
-                        paused = false;
-                        ready_announced = false;
-                        if let Some(dump) = event_dump.as_mut() {
-                            dump.write_line(json!({
+                        session.stop();
+                        let _ = engine.stop(now_ms());
+                        write_event_dump_line_lazy(&mut event_dump, &settings, || {
+                            json!({
                                 "ts_ms": now_ms(),
                                 "event": "runtime_stop",
                                 "payload": { "running": false, "paused": false }
-                            }));
-                        }
+                            })
+                        });
                         emit_tracking(&app, TrackingStatus::Lost);
                         emit_intent(&app, ControlIntent::ControlOff);
                         emit_vision(&app, VisionStatus::Stopped);
                         info!("runtime stopped");
                     }
                     RuntimeCommand::Pause => {
-                        paused = true;
-                        if let Some(dump) = event_dump.as_mut() {
-                            dump.write_line(json!({
+                        if !session.pause() {
+                            info!("pause ignored because runtime is stopped");
+                            continue;
+                        }
+                        write_event_dump_line_lazy(&mut event_dump, &settings, || {
+                            json!({
                                 "ts_ms": now_ms(),
                                 "event": "runtime_pause",
                                 "payload": { "paused": true }
-                            }));
-                        }
+                            })
+                        });
                         emit_intent(&app, ControlIntent::Paused);
                         emit_vision(&app, VisionStatus::Paused);
                         info!("runtime paused");
                     }
                     RuntimeCommand::Resume => {
-                        paused = false;
-                        if let Some(dump) = event_dump.as_mut() {
-                            dump.write_line(json!({
+                        let resume = session.resume();
+                        if !resume.accepted {
+                            info!("resume ignored because runtime is stopped");
+                            continue;
+                        }
+                        write_event_dump_line_lazy(&mut event_dump, &settings, || {
+                            json!({
                                 "ts_ms": now_ms(),
                                 "event": "runtime_resume",
                                 "payload": { "paused": false }
-                            }));
-                        }
+                            })
+                        });
                         emit_vision(&app, VisionStatus::Running);
-                        if vision_ready && !ready_announced {
+                        if resume.announce_ready {
                             emit_vision(&app, VisionStatus::Ready);
-                            ready_announced = true;
                         }
                         info!("runtime resumed");
                     }
                     RuntimeCommand::UpdateSettings(next) => {
-                        settings = next;
-                        engine.update_settings(settings.clone());
-                        input.update_settings(settings.clone());
-                        if let Some(dump) = event_dump.as_mut() {
-                            dump.write_payload("settings_updated", &settings);
+                        if !next.diagnostics_enabled {
+                            disable_event_dump_writer(&mut event_dump);
                         }
-                        vision_ready = false;
-                        ready_announced = false;
-                        if running {
+                        let tracker_changed = engine.update_settings(next.clone());
+                        input.update_settings(&next);
+                        write_event_dump_payload(&mut event_dump, &next, "settings_updated", &next);
+                        settings = next;
+                        if session.apply_tracker_settings_change(tracker_changed) {
                             emit_vision(&app, VisionStatus::LoadingModel);
                             emit_vision(&app, VisionStatus::LoadingCamera);
                         }
@@ -497,96 +696,106 @@ fn spawn_runtime_thread(app: tauri::AppHandle, initial: AppSettings) -> Sender<R
 
             let ts_ms = now_ms();
 
-            if !running {
-                match engine.warmup_tick(ts_ms) {
-                    WarmupState::NoFrame => {}
-                    WarmupState::FrameAvailable | WarmupState::HandVisible => {
-                        vision_ready = true;
-                    }
+            if session.running {
+                for event in engine.tick(ts_ms, session.paused) {
+                    handle_runtime_event(
+                        &app,
+                        &settings,
+                        &mut event_dump,
+                        &mut input,
+                        &mut session,
+                        event,
+                    );
                 }
             }
 
-            if running {
-                for event in engine.tick(ts_ms, paused) {
-                    match event {
-                        RuntimeEvent::VisionStatus { status } => {
-                            if let Some(dump) = event_dump.as_mut() {
-                                dump.write_payload("vision_status", &status);
-                            }
-                            emit_vision(&app, status)
-                        }
-                        RuntimeEvent::TrackingStatus { status } => {
-                            if let Some(dump) = event_dump.as_mut() {
-                                dump.write_payload("tracking_status", &status);
-                            }
-                            emit_tracking(&app, status)
-                        }
-                        RuntimeEvent::TrackingFrame { frame } => {
-                            if let Some(dump) = event_dump.as_mut() {
-                                dump.write_line(json!({
-                                    "ts_ms": now_ms(),
-                                    "event": "tracking_frame",
-                                    "payload": {
-                                        "ts_ms": frame.ts_ms,
-                                        "frame_id": frame.frame_id,
-                                        "confidence": frame.confidence,
-                                        "landmarks_len": frame.landmarks.len()
-                                    }
-                                }));
-                            }
-                            vision_ready = true;
-                            if !ready_announced {
-                                emit_vision(&app, VisionStatus::Ready);
-                                ready_announced = true;
-                            }
-                            emit_frame(&app, frame)
-                        }
-                        RuntimeEvent::CameraPreview { frame } => {
-                            if let Some(dump) = event_dump.as_mut() {
-                                dump.write_line(json!({
-                                    "ts_ms": now_ms(),
-                                    "event": "camera_preview",
-                                    "payload": {
-                                        "ts_ms": frame.ts_ms,
-                                        "frame_id": frame.frame_id,
-                                        "jpeg_len": frame.jpeg_base64.len()
-                                    }
-                                }));
-                            }
-                            emit_camera_preview(&app, frame)
-                        }
-                        RuntimeEvent::GestureHint { hint } => {
-                            if let Some(dump) = event_dump.as_mut() {
-                                dump.write_payload("gesture_hint", &hint);
-                            }
-                            emit_gesture_hint(&app, hint)
-                        }
-                        RuntimeEvent::ControlIntent { intent } => {
-                            if let Some(dump) = event_dump.as_mut() {
-                                dump.write_payload("gesture_debug", &intent);
-                            }
-                            if let Err(e) = input.apply(&intent) {
-                                warn!("input apply failed: {e}");
-                            }
-                            emit_intent(&app, intent);
-                        }
-                        RuntimeEvent::HealthMetrics { metrics } => {
-                            if let Some(dump) = event_dump.as_mut() {
-                                dump.write_payload("health_metrics", &metrics);
-                            }
-                            if let Err(e) = app.emit_all("health_metrics", metrics) {
-                                error!("health event emit failed: {e}");
-                            }
-                        }
-                    }
+            if session.running {
+                let sleep_duration =
+                    runtime_sleep_duration(settings.camera_fps, frame_started.elapsed());
+                if !sleep_duration.is_zero() {
+                    thread::sleep(sleep_duration);
+                }
+            } else {
+                match rx.recv() {
+                    Ok(cmd) => pending_cmd = Some(cmd),
+                    Err(_) => break,
                 }
             }
-
-            let loop_ms = (1000 / settings.camera_fps.max(1)) as u64;
-            thread::sleep(Duration::from_millis(loop_ms));
         }
     });
     tx
+}
+
+fn handle_runtime_event(
+    app: &tauri::AppHandle,
+    settings: &AppSettings,
+    event_dump: &mut Option<EventDumpWriter>,
+    input: &mut SafeInputDriver,
+    session: &mut RuntimeSessionState,
+    event: RuntimeEvent,
+) {
+    match event {
+        RuntimeEvent::VisionStatus { status } => {
+            write_event_dump_payload(event_dump, settings, "vision_status", &status);
+            emit_vision(app, status)
+        }
+        RuntimeEvent::TrackingStatus { status } => {
+            write_event_dump_payload(event_dump, settings, "tracking_status", &status);
+            emit_tracking(app, status)
+        }
+        RuntimeEvent::TrackingFrame { frame } => {
+            write_event_dump_line_lazy(event_dump, settings, || {
+                json!({
+                    "ts_ms": now_ms(),
+                    "event": "tracking_frame",
+                    "payload": {
+                        "ts_ms": frame.ts_ms,
+                        "frame_id": frame.frame_id,
+                        "confidence": frame.confidence,
+                        "landmarks_len": frame.landmarks.len()
+                    }
+                })
+            });
+            if session.mark_vision_ready() {
+                emit_vision(app, VisionStatus::Ready);
+            }
+            emit_frame(app, frame)
+        }
+        RuntimeEvent::CameraPreview { frame } => {
+            write_event_dump_line_lazy(event_dump, settings, || {
+                json!({
+                    "ts_ms": now_ms(),
+                    "event": "camera_preview",
+                    "payload": {
+                        "ts_ms": frame.ts_ms,
+                        "frame_id": frame.frame_id,
+                        "jpeg_len": frame.jpeg_base64.len()
+                    }
+                })
+            });
+            if session.mark_vision_ready() {
+                emit_vision(app, VisionStatus::Ready);
+            }
+            emit_camera_preview(app, frame)
+        }
+        RuntimeEvent::GestureHint { hint } => {
+            write_event_dump_payload(event_dump, settings, "gesture_hint", &hint);
+            emit_gesture_hint(app, hint)
+        }
+        RuntimeEvent::ControlIntent { intent } => {
+            write_event_dump_payload(event_dump, settings, "gesture_debug", &intent);
+            if let Err(e) = input.apply(&intent) {
+                warn!("input apply failed: {e}");
+            }
+            emit_intent(app, intent);
+        }
+        RuntimeEvent::HealthMetrics { metrics } => {
+            write_event_dump_payload(event_dump, settings, "health_metrics", &metrics);
+            if let Err(e) = app.emit_all("health_metrics", metrics) {
+                error!("health event emit failed: {e}");
+            }
+        }
+    }
 }
 
 fn emit_tracking(app: &tauri::AppHandle, status: TrackingStatus) {
@@ -661,4 +870,240 @@ fn init_logging() -> anyhow::Result<()> {
         .try_init()
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_session_start_selects_loading_until_vision_is_ready() {
+        let mut session = RuntimeSessionState::default();
+
+        assert_eq!(session.start(), StartDecision::NeedsLoading);
+        assert!(session.running);
+        assert!(!session.paused);
+        assert!(!session.ready_announced);
+
+        session.stop();
+        session.vision_ready = true;
+
+        assert_eq!(session.start(), StartDecision::AlreadyReady);
+        assert!(session.ready_announced);
+    }
+
+    #[test]
+    fn runtime_session_ignores_pause_and_resume_while_stopped() {
+        let mut session = RuntimeSessionState::default();
+
+        assert!(!session.pause());
+        assert_eq!(
+            session.resume(),
+            ResumeDecision {
+                accepted: false,
+                announce_ready: false,
+            }
+        );
+        assert!(!session.running);
+        assert!(!session.paused);
+    }
+
+    #[test]
+    fn runtime_session_marks_vision_ready_once_per_tracker_generation() {
+        let mut session = RuntimeSessionState::default();
+        let _ = session.start();
+
+        assert!(session.mark_vision_ready());
+        assert!(!session.mark_vision_ready());
+
+        assert!(session.apply_tracker_settings_change(true));
+        assert!(!session.vision_ready);
+        assert!(!session.ready_announced);
+        assert!(session.mark_vision_ready());
+    }
+
+    #[test]
+    fn runtime_session_settings_emit_loading_only_for_running_tracker_changes() {
+        let mut session = RuntimeSessionState::default();
+
+        assert!(!session.apply_tracker_settings_change(true));
+
+        let _ = session.start();
+        session.vision_ready = true;
+        session.ready_announced = true;
+
+        assert!(!session.apply_tracker_settings_change(false));
+        assert!(session.vision_ready);
+        assert!(session.ready_announced);
+
+        assert!(session.apply_tracker_settings_change(true));
+        assert!(!session.vision_ready);
+        assert!(!session.ready_announced);
+    }
+
+    #[test]
+    fn coalesces_consecutive_runtime_settings_updates() {
+        let (tx, rx) = mpsc::channel();
+        let first = AppSettings {
+            camera_width: 640,
+            ..AppSettings::default()
+        };
+        let second = AppSettings {
+            camera_width: 800,
+            ..AppSettings::default()
+        };
+        let latest = AppSettings {
+            camera_width: 1024,
+            ..AppSettings::default()
+        };
+
+        tx.send(RuntimeCommand::UpdateSettings(second))
+            .expect("send second");
+        tx.send(RuntimeCommand::UpdateSettings(latest.clone()))
+            .expect("send latest");
+
+        let (cmd, pending, coalesced) =
+            coalesce_runtime_command(&rx, RuntimeCommand::UpdateSettings(first));
+
+        assert_eq!(coalesced, 2);
+        assert!(pending.is_none());
+        match cmd {
+            RuntimeCommand::UpdateSettings(settings) => assert_eq!(settings, latest),
+            _ => panic!("expected settings update"),
+        }
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn runtime_settings_coalescing_preserves_next_control_command() {
+        let (tx, rx) = mpsc::channel();
+        let first = AppSettings {
+            camera_width: 640,
+            ..AppSettings::default()
+        };
+        let latest_before_stop = AppSettings {
+            camera_width: 800,
+            ..AppSettings::default()
+        };
+        let later_settings = AppSettings {
+            camera_width: 1024,
+            ..AppSettings::default()
+        };
+
+        tx.send(RuntimeCommand::UpdateSettings(latest_before_stop.clone()))
+            .expect("send settings");
+        tx.send(RuntimeCommand::Stop).expect("send stop");
+        tx.send(RuntimeCommand::UpdateSettings(later_settings.clone()))
+            .expect("send later settings");
+
+        let (cmd, pending, coalesced) =
+            coalesce_runtime_command(&rx, RuntimeCommand::UpdateSettings(first));
+
+        assert_eq!(coalesced, 1);
+        match cmd {
+            RuntimeCommand::UpdateSettings(settings) => assert_eq!(settings, latest_before_stop),
+            _ => panic!("expected settings update"),
+        }
+        assert!(matches!(pending, Some(RuntimeCommand::Stop)));
+        match rx.try_recv().expect("later command remains queued") {
+            RuntimeCommand::UpdateSettings(settings) => assert_eq!(settings, later_settings),
+            _ => panic!("expected later settings update"),
+        }
+    }
+
+    #[test]
+    fn runtime_frame_period_uses_configured_fps() {
+        assert_eq!(runtime_frame_period(0), Duration::from_secs(1));
+        assert_eq!(runtime_frame_period(1), Duration::from_secs(1));
+        assert_eq!(runtime_frame_period(30), Duration::from_nanos(33_333_333));
+        assert_eq!(runtime_frame_period(120), Duration::from_nanos(8_333_333));
+    }
+
+    #[test]
+    fn runtime_sleep_duration_counts_elapsed_work() {
+        assert_eq!(
+            runtime_sleep_duration(30, Duration::from_millis(10)),
+            Duration::from_nanos(23_333_333)
+        );
+        assert_eq!(
+            runtime_sleep_duration(30, Duration::from_millis(40)),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn calibration_builder_clamps_values_and_preserves_safety_overrides() {
+        let req = CalibrationRequest {
+            profile: CalibrationProfile::Responsive,
+            pointer_range: Some(99.0),
+            move_gain: Some(0.0),
+            move_accel: Some(99.0),
+            move_max_delta: Some(0.0),
+            deadzone: Some(1.0),
+            hold_to_control_ms: Some(1),
+            clutch_enter_ms: Some(1_000),
+            pinch_threshold: Some(f32::NAN),
+            right_pinch_threshold: Some(99.0),
+            click_cooldown_ms: Some(1),
+            confidence_lock: Some(f32::NAN),
+            confidence_unlock: Some(0.99),
+            input_injection_enabled: Some(true),
+            safe_mode: Some(false),
+            allow_safe_mode_movement: Some(true),
+        };
+
+        let cfg = build_calibrated_settings(AppSettings::default(), req, 123);
+
+        assert_eq!(cfg.calibration_profile, CalibrationProfile::Responsive);
+        assert_eq!(cfg.pointer_range, 3.0);
+        assert_eq!(cfg.move_gain, 1.0);
+        assert_eq!(cfg.move_accel, 30.0);
+        assert_eq!(cfg.move_max_delta, 0.01);
+        assert_eq!(cfg.deadzone, 0.08);
+        assert_eq!(cfg.hold_to_control_ms, 20);
+        assert_eq!(cfg.clutch_enter_ms, 300);
+        assert_eq!(cfg.pinch_threshold, 0.035);
+        assert_eq!(cfg.right_pinch_threshold, 0.100);
+        assert_eq!(cfg.click_cooldown_ms, 60);
+        assert_eq!(cfg.confidence_lock, 0.65);
+        assert!(cfg.confidence_unlock < cfg.confidence_lock);
+        assert!(cfg.input_injection_enabled);
+        assert!(!cfg.safe_mode);
+        assert!(cfg.allow_safe_mode_movement);
+        assert_eq!(cfg.calibrated_at_ms, Some(123));
+    }
+
+    #[test]
+    fn calibration_result_reflects_settings_snapshot() {
+        let cfg = AppSettings {
+            calibration_profile: CalibrationProfile::Comfort,
+            calibrated_at_ms: Some(77),
+            pointer_range: 1.25,
+            ..AppSettings::default()
+        };
+
+        let result = CalibrationResult::from(&cfg);
+
+        assert_eq!(result.profile, CalibrationProfile::Comfort);
+        assert_eq!(result.pointer_range, 1.25);
+        assert_eq!(result.calibrated_at_ms, Some(77));
+    }
+
+    #[test]
+    fn event_dump_line_lazy_skips_builder_when_diagnostics_disabled() {
+        let mut event_dump = None;
+        let settings = AppSettings {
+            diagnostics_enabled: false,
+            ..AppSettings::default()
+        };
+        let mut called = false;
+
+        write_event_dump_line_lazy(&mut event_dump, &settings, || {
+            called = true;
+            json!({ "event": "should_not_be_built" })
+        });
+
+        assert!(!called);
+        assert!(event_dump.is_none());
+    }
 }
