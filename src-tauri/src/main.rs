@@ -597,6 +597,7 @@ fn spawn_runtime_thread(app: tauri::AppHandle, initial: AppSettings) -> Sender<R
         let mut input = SafeInputDriver::new(&settings);
         let mut session = RuntimeSessionState::default();
         let mut pending_cmd = None;
+        let mut runtime_events = Vec::with_capacity(4);
 
         loop {
             let frame_started = Instant::now();
@@ -697,7 +698,8 @@ fn spawn_runtime_thread(app: tauri::AppHandle, initial: AppSettings) -> Sender<R
             let ts_ms = now_ms();
 
             if session.running {
-                for event in engine.tick(ts_ms, session.paused) {
+                engine.tick_into(ts_ms, session.paused, &mut runtime_events);
+                for event in runtime_events.drain(..) {
                     handle_runtime_event(
                         &app,
                         &settings,

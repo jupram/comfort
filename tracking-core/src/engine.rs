@@ -76,7 +76,13 @@ impl RuntimeEngine {
     }
 
     pub fn tick(&mut self, ts_ms: u64, paused: bool) -> Vec<RuntimeEvent> {
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(4);
+        self.tick_into(ts_ms, paused, &mut out);
+        out
+    }
+
+    pub fn tick_into(&mut self, ts_ms: u64, paused: bool, out: &mut Vec<RuntimeEvent>) {
+        out.clear();
         let loop_start = Instant::now();
 
         if paused {
@@ -131,7 +137,7 @@ impl RuntimeEngine {
                 out.push(RuntimeEvent::HealthMetrics { metrics: h });
             }
             self.last_tick = loop_start;
-            return out;
+            return;
         }
 
         let packet = self.next_packet(ts_ms);
@@ -174,7 +180,7 @@ impl RuntimeEngine {
                 .lost_since_ms
                 .map(|since| ts_ms.saturating_sub(since) >= lost_reset_grace_ms)
                 .unwrap_or(false);
-        self.emit_status_if_changed(&mut out, status);
+        self.emit_status_if_changed(out, status);
 
         let mut emitted_landmark_hint = false;
         if let Some(landmarks) = packet.landmarks {
@@ -185,11 +191,11 @@ impl RuntimeEngine {
                 if status != TrackingStatus::Lost {
                     self.gestures
                         .process_into(ts_ms, &filtered, &mut self.intent_scratch);
-                    self.drain_control_intents(&mut out);
+                    self.drain_control_intents(out);
                 } else if should_reset_on_lost {
                     self.gestures
                         .reset_on_lost_into(ts_ms, &mut self.intent_scratch);
-                    self.drain_control_intents(&mut out);
+                    self.drain_control_intents(out);
                 }
                 let hint = self.gestures.hint(ts_ms, &filtered);
                 out.push(RuntimeEvent::GestureHint {
@@ -232,7 +238,7 @@ impl RuntimeEngine {
         if status == TrackingStatus::Lost && !emitted_landmark_hint && should_reset_on_lost {
             self.gestures
                 .reset_on_lost_into(ts_ms, &mut self.intent_scratch);
-            self.drain_control_intents(&mut out);
+            self.drain_control_intents(out);
         }
 
         let latency_ms = loop_start.elapsed().as_secs_f32() * 1000.0;
@@ -242,7 +248,6 @@ impl RuntimeEngine {
             out.push(RuntimeEvent::HealthMetrics { metrics: h });
         }
         self.last_tick = loop_start;
-        out
     }
 
     pub fn warmup_tick(&mut self, ts_ms: u64) -> WarmupState {
@@ -334,6 +339,23 @@ mod tests {
                 status: TrackingStatus::Tracking
             }
         )));
+    }
+
+    #[test]
+    fn tick_into_reuses_caller_event_buffer() {
+        let settings = AppSettings {
+            vision_backend: crate::config::VisionBackend::Mock,
+            ..AppSettings::default()
+        };
+        let mut engine = RuntimeEngine::new(settings);
+        let mut events = Vec::with_capacity(8);
+        let ptr = events.as_ptr();
+
+        engine.tick_into(10, false, &mut events);
+
+        assert_eq!(events.as_ptr(), ptr);
+        assert!(!events.is_empty());
+        assert!(events.capacity() >= 8);
     }
 
     #[test]
