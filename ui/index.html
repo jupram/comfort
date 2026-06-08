@@ -204,6 +204,7 @@
             <div>Current Pose: <span id="pose-hint" class="status-pill">none</span></div>
           </div>
           <div id="hint-meta" class="meta">No gesture hint yet</div>
+          <div id="input-policy-meta" class="meta">Input policy not loaded yet</div>
           <div id="health-meta" class="meta">No health metrics yet</div>
         </div>
         <div class="card">
@@ -275,6 +276,7 @@
       const lastEventEl = document.getElementById("last-event");
       const poseHintEl = document.getElementById("pose-hint");
       const hintMeta = document.getElementById("hint-meta");
+      const inputPolicyMeta = document.getElementById("input-policy-meta");
       const healthMeta = document.getElementById("health-meta");
       const settingsMeta = document.getElementById("settings-meta");
       const calibrationStateEl = document.getElementById("calibration-state");
@@ -734,6 +736,21 @@
         document.getElementById("set-safe-move").checked = !!s.allow_safe_mode_movement;
         document.getElementById("set-diagnostics").checked = !!s.diagnostics_enabled;
         settingsMeta.textContent = `Loaded profile=${s.calibration_profile || "balanced"} calibrated_at_ms=${s.calibrated_at_ms ?? "never"}`;
+        updateInputPolicyMeta(s);
+      };
+
+      const updateInputPolicyMeta = (s) => {
+        if (!s) {
+          setTextIfChanged(inputPolicyMeta, "Input policy not loaded yet");
+        } else if (!s.input_injection_enabled) {
+          setTextIfChanged(inputPolicyMeta, "Pointer movement blocked: input injection disabled");
+        } else if (s.safe_mode && !s.allow_safe_mode_movement) {
+          setTextIfChanged(inputPolicyMeta, "Pointer movement blocked: safe-mode movement disabled");
+        } else if (s.safe_mode) {
+          setTextIfChanged(inputPolicyMeta, "Pointer movement enabled; clicks suppressed by safe mode");
+        } else {
+          setTextIfChanged(inputPolicyMeta, "Pointer movement and clicks enabled");
+        }
       };
 
       const getNumber = (id, fallback) => {
@@ -785,6 +802,7 @@
         const next = readSettingsFromForm();
         await invoke("save_settings", { settings: next });
         currentSettings = next;
+        updateInputPolicyMeta(next);
         settingsMeta.textContent = "Saved and applied to runtime.";
         push("settings saved");
       };
