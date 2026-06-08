@@ -77,6 +77,12 @@ def make_preview_jpeg_b64(frame, max_width=640):
     return base64.b64encode(encoded).decode("ascii")
 
 
+def sleep_remaining_frame_time(frame_started, frame_sleep):
+    remaining = frame_sleep - (time.monotonic() - frame_started)
+    if remaining > 0:
+        time.sleep(remaining)
+
+
 def ensure_model(model_path):
     path = Path(model_path)
     if path.is_file() and path.stat().st_size > 0:
@@ -176,6 +182,7 @@ def main():
         frame_sleep = 1.0 / max(args.fps, 1)
 
         while True:
+            frame_started = time.monotonic()
             ok, frame = cap.read()
             ts_ms = int(time.time() * 1000)
             if not ok or frame is None:
@@ -189,7 +196,7 @@ def main():
                     }
                 )
                 frame_id += 1
-                time.sleep(frame_sleep)
+                sleep_remaining_frame_time(frame_started, frame_sleep)
                 continue
 
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -210,7 +217,7 @@ def main():
 
             preview_jpeg_base64 = None
             if args.preview_every > 0 and frame_id % args.preview_every == 0:
-                preview_frame = frame.copy()
+                preview_frame = frame
                 if landmarks:
                     draw_landmarks_on_frame(preview_frame, landmarks)
                 label = f"conf={confidence:.2f} frame={frame_id}"
@@ -236,6 +243,7 @@ def main():
                 }
             )
             frame_id += 1
+            sleep_remaining_frame_time(frame_started, frame_sleep)
     except KeyboardInterrupt:
         pass
     finally:

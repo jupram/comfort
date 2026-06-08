@@ -284,12 +284,16 @@
 
       let currentSettings = null;
       let latestHint = {};
-      let latestHealth = null;
       let frameCount = 0;
       let previewCount = 0;
+      let pendingHint = null;
+      let hintRenderPending = false;
+      let pendingPreview = null;
+      let previewRenderPending = false;
       const eventCounts = {};
       const logLines = [];
       const maxLogLines = 120;
+      const maxCalibrationSamples = 900;
       let eventCountsRenderPending = false;
 
       const calibrationSteps = [
@@ -423,29 +427,91 @@
 
       const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
+      const setTextIfChanged = (el, text) => {
+        if (el.textContent !== text) el.textContent = text;
+      };
+
+      const pushCalibrationSample = (samples, value) => {
+        if (!Number.isFinite(value)) return;
+        samples.push(value);
+        if (samples.length > maxCalibrationSamples) {
+          samples.splice(0, samples.length - maxCalibrationSamples);
+        }
+      };
+
+      const scheduleHintRender = (hint) => {
+        pendingHint = hint;
+        if (hintRenderPending) return;
+        hintRenderPending = true;
+        requestAnimationFrame(() => {
+          const p = pendingHint || {};
+          pendingHint = null;
+          hintRenderPending = false;
+          setTextIfChanged(poseHintEl, p.label || "unknown");
+          setTextIfChanged(controlModeEl, p.control_mode || (p.move_active ? "move" : "inactive"));
+          const holdPercent = Math.round((p.hold_progress || 0) * 100);
+          setTextIfChanged(
+            hintMeta,
+            `mode=${p.control_mode || "unknown"} hold=${holdPercent}% move=${!!p.move_active} open=${!!p.open_palm_pose} two_finger=${!!p.two_finger_pose} closed=${!!p.closed_palm_pose} down=${!!p.hand_down_pose} ` +
+              `pinch(index/middle)=${!!p.pinch_index}/${!!p.pinch_middle} dist(t-i/t-m)=${(p.thumb_index_distance || 0).toFixed(3)}/${(p.thumb_middle_distance || 0).toFixed(3)} ` +
+              `thr=${(p.pinch_index_threshold || 0).toFixed(3)}/${(p.pinch_middle_threshold || 0).toFixed(3)}`,
+          );
+        });
+      };
+
+      const schedulePreviewRender = (payload) => {
+        pendingPreview = payload;
+        if (previewRenderPending) return;
+        previewRenderPending = true;
+        requestAnimationFrame(() => {
+          const p = pendingPreview || {};
+          pendingPreview = null;
+          previewRenderPending = false;
+          if (!p.jpeg_base64) return;
+          preview.src = `data:image/jpeg;base64,${p.jpeg_base64}`;
+          if (previewCount % 15 === 0) {
+            setTextIfChanged(frameMeta, `camera_preview frame=${p.frame_id}`);
+          }
+        });
+      };
+
       const renderCalibrationSteps = () => {
-        calibrationStepsEl.innerHTML = calibrationSteps
-          .map((step, idx) => {
-            const cls = idx < calibration.stepIndex ? "done" : idx === calibration.stepIndex ? "active" : "";
-            return `<li class="${cls}"><strong>${step.title}</strong><div class="small">${step.instruction}</div></li>`;
-          })
-          .join("");
+        calibrationStepsEl.replaceChildren();
+        const fragment = document.createDocumentFragment();
+        calibrationSteps.forEach((step, idx) => {
+          const item = document.createElement("li");
+          if (idx < calibration.stepIndex) {
+            item.className = "done";
+          } else if (idx === calibration.stepIndex) {
+            item.className = "active";
+          }
+
+          const title = document.createElement("strong");
+          title.textContent = step.title;
+          const instruction = document.createElement("div");
+          instruction.className = "small";
+          instruction.textContent = step.instruction;
+
+          item.append(title, instruction);
+          fragment.append(item);
+        });
+        calibrationStepsEl.append(fragment);
       };
 
       const activeStep = () => calibrationSteps[calibration.stepIndex] || null;
 
       const setCalibrationStateText = () => {
         if (!calibration.active && !calibration.finished) {
-          calibrationStateEl.textContent = "Not started";
+          setTextIfChanged(calibrationStateEl, "Not started");
           return;
         }
         if (calibration.finished) {
-          calibrationStateEl.textContent = "Calibration complete. Review and apply suggested tuning.";
+          setTextIfChanged(calibrationStateEl, "Calibration complete. Review and apply suggested tuning.");
           return;
         }
         const step = activeStep();
         const pct = Math.round(calibration.stepProgress * 100);
-        calibrationStateEl.textContent = `Step ${calibration.stepIndex + 1}/${calibrationSteps.length}: ${step.title} (${pct}%)`;
+        setTextIfChanged(calibrationStateEl, `Step ${calibration.stepIndex + 1}/${calibrationSteps.length}: ${step.title} (${pct}%)`);
       };
 
       const resetCalibrationState = () => {
@@ -753,19 +819,19 @@
       listen("vision_status", (event) => {
         bumpEvent("vision_status");
         const s = event.payload;
-        visionStatusEl.textContent = s;
+        setTextIfChanged(visionStatusEl, s);
       });
 
       listen("tracking_status", (event) => {
         bumpEvent("tracking_status");
         const s = event.payload;
-        trackingStatusEl.textContent = s;
+        setTextIfChanged(trackingStatusEl, s);
       });
 
       listen("gesture_debug", (event) => {
         bumpEvent("gesture_debug");
         const p = event.payload || {};
-        lastEventEl.textContent = p.type || "gesture";
+        setTextIfChanged(lastEventEl, p.type || "gesture");
         if (calibration.active) {
           if (p.type === "left_click" && activeStep()?.id === "click_test") calibration.stepClicks.left += 1;
           if (p.type === "right_click" && activeStep()?.id === "click_test") calibration.stepClicks.right += 1;
@@ -780,19 +846,13 @@
         bumpEvent("gesture_hint");
         const p = event.payload || {};
         latestHint = p;
-        poseHintEl.textContent = p.label || "unknown";
-        controlModeEl.textContent = p.control_mode || (p.move_active ? "move" : "inactive");
-        const holdPercent = Math.round((p.hold_progress || 0) * 100);
-        hintMeta.textContent =
-          `mode=${p.control_mode || "unknown"} hold=${holdPercent}% move=${!!p.move_active} open=${!!p.open_palm_pose} two_finger=${!!p.two_finger_pose} closed=${!!p.closed_palm_pose} down=${!!p.hand_down_pose} ` +
-          `pinch(index/middle)=${!!p.pinch_index}/${!!p.pinch_middle} dist(t-i/t-m)=${(p.thumb_index_distance || 0).toFixed(3)}/${(p.thumb_middle_distance || 0).toFixed(3)} ` +
-          `thr=${(p.pinch_index_threshold || 0).toFixed(3)}/${(p.pinch_middle_threshold || 0).toFixed(3)}`;
+        scheduleHintRender(p);
         if (calibration.active) {
           if (p.pinch_index && p.thumb_index_distance) {
-            calibration.pinchIndexSamples.push(p.thumb_index_distance);
+            pushCalibrationSample(calibration.pinchIndexSamples, p.thumb_index_distance);
           }
           if (p.pinch_middle && p.thumb_middle_distance) {
-            calibration.pinchMiddleSamples.push(p.thumb_middle_distance);
+            pushCalibrationSample(calibration.pinchMiddleSamples, p.thumb_middle_distance);
           }
           if (activeStep()?.id === "click_test" && p.control_mode === "clutch") {
             if (p.pinch_index && !calibration.prevPinchIndex) {
@@ -811,10 +871,11 @@
       listen("health_metrics", (event) => {
         bumpEvent("health_metrics");
         const p = event.payload || {};
-        latestHealth = p;
-        healthMeta.textContent =
+        setTextIfChanged(
+          healthMeta,
           `fps_in=${(p.fps_in || 0).toFixed(1)} fps_out=${(p.fps_out || 0).toFixed(1)} ` +
-          `latency p50/p95=${(p.latency_p50_ms || 0).toFixed(1)}/${(p.latency_p95_ms || 0).toFixed(1)}ms dropped=${p.dropped_frames || 0}`;
+            `latency p50/p95=${(p.latency_p50_ms || 0).toFixed(1)}/${(p.latency_p95_ms || 0).toFixed(1)}ms dropped=${p.dropped_frames || 0}`,
+        );
       });
 
       listen("tracking_frame", (event) => {
@@ -823,11 +884,11 @@
         const p = event.payload || {};
         const conf = Number.isFinite(p.confidence) ? p.confidence : 0;
         if (frameCount % 10 === 0) {
-          frameMeta.textContent = `frame=${p.frame_id} confidence=${conf.toFixed(2)} landmarks=${(p.landmarks || []).length}`;
+          setTextIfChanged(frameMeta, `frame=${p.frame_id} confidence=${conf.toFixed(2)} landmarks=${(p.landmarks || []).length}`);
         }
 
         if (!calibration.active) return;
-        calibration.confidenceSamples.push(conf);
+        pushCalibrationSample(calibration.confidenceSamples, conf);
         const idx = p.landmarks && p.landmarks[8] ? p.landmarks[8] : null;
         if (idx && calibration.prevIndexPoint) {
           const dx = idx.x - calibration.prevIndexPoint.x;
@@ -835,10 +896,10 @@
           const dist = Math.hypot(dx, dy);
           if (latestHint.control_mode === "move" && latestHint.two_finger_pose) {
             calibration.stepMoveDistance += dist;
-            calibration.movementSamples.push(dist);
+            pushCalibrationSample(calibration.movementSamples, dist);
           }
           if (latestHint.open_palm_pose) {
-            calibration.jitterSamples.push(dist);
+            pushCalibrationSample(calibration.jitterSamples, dist);
           }
         }
         calibration.prevIndexPoint = idx || calibration.prevIndexPoint;
@@ -849,8 +910,7 @@
         previewCount += 1;
         const p = event.payload || {};
         if (p.jpeg_base64) {
-          preview.src = `data:image/jpeg;base64,${p.jpeg_base64}`;
-          if (previewCount % 15 === 0) frameMeta.textContent = `camera_preview frame=${p.frame_id}`;
+          schedulePreviewRender(p);
         }
       });
 
