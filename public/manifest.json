@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "Comfort Gesture Control",
+  "description": "Scroll and click web pages with a focused set of camera-detected hand gestures.",
+  "version": "1.0.3",
+  "minimum_chrome_version": "116",
+  "permissions": ["sidePanel", "storage", "tabs", "scripting"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Open Comfort Gesture Control"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  }
+}

@@ -1,7 +1,7 @@
-target/
-dist/
 node_modules/
-.tauri/
+dist/
+.vite/
+coverage/
 *.log
 __pycache__/
 *.py[cod]

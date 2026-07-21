@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Comfort Gesture Control</title>
+    <script type="module" src="/src/sidepanel.js"></script>
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="app-header">
+        <div class="brand-mark" aria-hidden="true">
+          <span></span><span></span><span></span>
+        </div>
+        <div>
+          <p class="eyebrow">COMFORT</p>
+          <h1>Gesture control</h1>
+        </div>
+        <div id="control-status" class="status-pill" data-kind="idle">
+          <span class="status-dot"></span>
+          <span id="control-status-text">Off</span>
+        </div>
+      </header>
+
+      <section class="camera-card" aria-label="Camera preview">
+        <video id="camera" autoplay muted playsinline></video>
+        <canvas id="landmark-canvas"></canvas>
+        <div id="camera-placeholder" class="camera-placeholder">
+          <div class="camera-icon" aria-hidden="true"></div>
+          <strong>Camera is off</strong>
+          <span>Video stays on this device</span>
+        </div>
+        <div class="preview-chip"><span></span> Local processing</div>
+        <div class="center-guide" aria-hidden="true"></div>
+      </section>
+
+      <section class="control-card">
+        <div class="live-readout">
+          <div>
+            <span class="section-label">CURRENT GESTURE</span>
+            <strong id="gesture-readout">Enable the camera</strong>
+          </div>
+          <span id="hand-indicator" class="hand-indicator">No hand</span>
+        </div>
+
+        <div id="notice" class="notice" data-kind="info" role="status" aria-live="polite">
+          Open your hand to start. Make a fist to stop.
+        </div>
+
+        <button id="camera-button" class="primary-button" type="button">
+          <span class="button-camera-icon" aria-hidden="true"></span>
+          Enable camera
+        </button>
+        <button id="camera-permission-button" class="outline-button permission-button" type="button" hidden>
+          Open camera permission
+        </button>
+        <button id="stop-button" class="secondary-button" type="button" disabled>
+          Stop control
+        </button>
+      </section>
+
+      <section class="settings-card">
+        <div class="section-heading">
+          <div>
+            <span class="section-label">SETUP</span>
+            <h2>Calibration</h2>
+          </div>
+          <span id="calibration-state" class="saved-badge">Default</span>
+        </div>
+        <p>Teach the extension your relaxed two-finger spacing and pinch distance.</p>
+        <button id="calibrate-button" class="outline-button" type="button" disabled>
+          Run calibration
+        </button>
+
+        <label class="range-row" for="scroll-speed">
+          <span>Scroll speed</span>
+          <output id="speed-output" for="scroll-speed">1.0×</output>
+        </label>
+        <input id="scroll-speed" type="range" min="0.5" max="2" step="0.1" value="1" />
+      </section>
+
+      <section class="gesture-card">
+        <div class="section-heading">
+          <div>
+            <span class="section-label">QUICK GUIDE</span>
+            <h2>Gesture map</h2>
+          </div>
+        </div>
+        <ul class="gesture-list">
+          <li><span class="gesture-symbol open">✋</span><div><strong>Open hand</strong><small>Start control</small></div></li>
+          <li><span class="gesture-symbol fist">●</span><div><strong>Closed fist</strong><small>Stop control</small></div></li>
+          <li><span class="gesture-symbol">↕</span><div><strong>Two fingers</strong><small>Slide to scroll</small></div></li>
+          <li><span class="gesture-symbol pinch">⌁</span><div><strong>Pinch / pinch twice</strong><small>Click / double-click</small></div></li>
+        </ul>
+      </section>
+
+      <p class="footnote">Clicks land on the green reticle at the center of the page. The pointer never moves.</p>
+    </main>
+  </body>
+</html>

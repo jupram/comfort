@@ -1,39 +1,44 @@
-# Comfort Gesture Mouse
+# Comfort Gesture Control
 
-Desktop app that uses webcam hand tracking (MediaPipe) to control the mouse with minimal gestures.
+A Chrome/Edge Manifest V3 extension that lets you scroll and click the current page with a small set of camera-detected hand gestures. Processing stays in the extension: the MediaPipe runtime and hand model are packaged locally.
 
-## Current Gesture Map
+## Gestures
 
-- Open palm (hold briefly): enable control (`control_on`)
-- Index + middle fingers: move cursor
-- Thumb + index pinch: left click
-- Thumb + middle pinch: right click
-- Closed fist (hold briefly): disable control (`control_off`)
+| Gesture | Result |
+| --- | --- |
+| Hold an open hand | Start control |
+| Hold a closed fist | Stop control |
+| Extend index + middle fingers and slide down | Scroll down |
+| Extend index + middle fingers and slide up | Scroll up |
+| Pinch index + middle fingertips once | Click at the center reticle |
+| Pinch index + middle fingertips twice | Double-click at the center reticle |
 
-## Quick Start (Windows)
+Scrolling and clicking are ignored until the open-hand start gesture has been accepted. A green page-edge halo and an `ON` toolbar badge identify the controlled tab. Changing tabs or closing the side panel stops control automatically.
+
+## Build and load
 
 ```powershell
-python -m pip install -r vision/requirements.txt
-cargo run -p gesture-mouse-desktop
+npm.cmd install
+npm.cmd run build
 ```
 
-In the app:
+Then open `chrome://extensions` or `edge://extensions`, enable **Developer mode**, choose **Load unpacked**, and select the generated `dist` directory.
 
-1. Click `Start`
-2. Wait for camera/model warmup
-3. Use gestures above to control pointer
+Click the extension toolbar button to open its side panel, enable the camera, and run calibration once. Calibration records your relaxed two-finger spacing and pinch spacing; the scroll-speed slider can be adjusted at any time.
 
-## Tech Stack
-
-- Rust workspace (`tracking-core` + Tauri desktop app)
-- Python sidecar for MediaPipe + OpenCV (`vision/mediapipe_tracker.py`)
-- Web UI served by Tauri (`ui/index.html`)
+If camera access is blocked, the side panel shows **Open camera permission**. Use it to open the extension's permission page, click **Allow camera**, approve the browser prompt, then return to the side panel and enable the camera again. If Windows blocks camera access for desktop apps, enable it under **Settings > Privacy & security > Camera** first.
 
 ## Notes
 
-- Runtime diagnostics/events are written to local app data as `runtime-events.jsonl`.
-- Default mouse injection is safety-gated in settings.
+- Clicks target the fixed reticle in the center of the page; the extension never moves the pointer.
+- Browser-internal pages, extension stores, and other protected pages do not permit content scripts and cannot be controlled.
+- Synthetic extension clicks work on normal links, buttons, and controls, but sites that explicitly require trusted hardware input may reject them.
 
-## License
+## Development
 
-MIT. See [LICENSE](LICENSE).
+```powershell
+npm.cmd test
+npm.cmd run build
+```
+
+Source lives in `src/`; extension service-worker and content-script files live in `public/` so Vite copies them without transformation.
