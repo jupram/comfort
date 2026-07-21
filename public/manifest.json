@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Comfort Gesture Control",
   "description": "Scroll and click web pages with a focused set of camera-detected hand gestures.",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "minimum_chrome_version": "116",
   "permissions": ["sidePanel", "storage", "tabs", "scripting"],
   "host_permissions": ["<all_urls>"],

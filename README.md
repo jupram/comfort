@@ -6,14 +6,14 @@ A Chrome/Edge Manifest V3 extension that lets you scroll and click the current p
 
 | Gesture | Result |
 | --- | --- |
-| Hold an open hand | Start control |
+| Hold a thumbs-up | Start control |
 | Hold a closed fist | Stop control |
 | Extend index + middle fingers and slide down | Scroll down |
 | Extend index + middle fingers and slide up | Scroll up |
 | Pinch index + middle fingertips once | Click at the center reticle |
 | Pinch index + middle fingertips twice | Double-click at the center reticle |
 
-Scrolling and clicking are ignored until the open-hand start gesture has been accepted. A green page-edge halo and an `ON` toolbar badge identify the controlled tab. Changing tabs or closing the side panel stops control automatically.
+Scrolling and clicking are ignored until the thumbs-up start gesture has been accepted. A green page-edge halo and an `ON` toolbar badge identify the controlled tab. Changing tabs or closing the side panel stops control automatically.
 
 ## Build and load
 

@@ -1,13 +1,15 @@
+const CONTROL_STATE_KEY = "comfortControlState";
 const control = {
   active: false,
   targetTabId: null,
 };
 
 let panelPort = null;
+const controlReady = restoreControl();
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
-  clearBadge();
+  void controlReady.then(resetControl).catch(() => clearBadge());
 });
 
 chrome.runtime.onStartup.addListener(clearBadge);
@@ -18,15 +20,19 @@ chrome.runtime.onConnect.addListener((port) => {
   panelPort = port;
   port.onDisconnect.addListener(() => {
     if (panelPort === port) panelPort = null;
-    void deactivateControl("panel-closed");
+    void controlReady
+      .then(() => deactivateControl("panel-closed"))
+      .catch(() => {});
   });
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "SET_CONTROL_STATE") {
-    const task = message.active
-      ? activateControl(message.tabId)
-      : deactivateControl(message.reason ?? "gesture");
+    const task = controlReady.then(() => (
+      message.active
+        ? activateControl(message.tabId)
+        : deactivateControl(message.reason ?? "gesture")
+    ));
 
     task
       .then(() => sendResponse({ ok: true, ...control }))
@@ -35,37 +41,54 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message?.type === "GESTURE_ACTION") {
-    forwardGesture(message.action)
+    controlReady
+      .then(() => forwardGesture(message.action))
       .then(() => sendResponse({ ok: true }))
       .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;
   }
 
   if (message?.type === "GET_CONTROL_STATE") {
-    sendResponse({ ...control });
+    controlReady
+      .then(() => sendResponse({ ...control }))
+      .catch((error) => sendResponse({ active: false, targetTabId: null, error: error.message }));
+    return true;
   }
 
   return false;
 });
 
 chrome.tabs.onActivated.addListener(({ tabId }) => {
-  if (control.active && tabId !== control.targetTabId) {
-    void deactivateControl("tab-changed", true);
-  }
+  void controlReady
+    .then(() => {
+      if (control.active && tabId !== control.targetTabId) {
+        return deactivateControl("tab-changed", true);
+      }
+      return undefined;
+    })
+    .catch(() => {});
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-  if (control.active && tabId === control.targetTabId) {
-    void deactivateControl("tab-closed", true);
-  }
+  void controlReady
+    .then(() => {
+      if (control.active && tabId === control.targetTabId) {
+        return deactivateControl("tab-closed", true);
+      }
+      return undefined;
+    })
+    .catch(() => {});
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (control.active && tabId === control.targetTabId && changeInfo.status === "complete") {
-    void ensureContentScript(tabId)
-      .then(() => sendToTab(tabId, { type: "CONTROL_STATE", active: true }))
-      .catch(() => deactivateControl("target-unavailable", true));
-  }
+  void controlReady
+    .then(() => {
+      if (!control.active || tabId !== control.targetTabId || changeInfo.status !== "complete") return;
+      return ensureContentScript(tabId)
+        .then(() => sendToTab(tabId, { type: "CONTROL_STATE", active: true }))
+        .catch(() => deactivateControl("target-unavailable", true));
+    })
+    .catch(() => {});
 });
 
 async function activateControl(tabId) {
@@ -82,16 +105,35 @@ async function activateControl(tabId) {
     await sendToTab(control.targetTabId, { type: "CONTROL_STATE", active: false }).catch(() => {});
   }
 
-  control.active = true;
-  control.targetTabId = tabId;
-  await sendToTab(tabId, { type: "CONTROL_STATE", active: true });
-  await setBadge(tabId, true);
+  try {
+    await sendToTab(tabId, { type: "CONTROL_STATE", active: true });
+    await setBadge(tabId, true);
+    control.active = true;
+    control.targetTabId = tabId;
+    await persistControl();
+  } catch (error) {
+    control.active = false;
+    control.targetTabId = null;
+    await Promise.allSettled([
+      persistControl(),
+      sendToTab(tabId, { type: "CONTROL_STATE", active: false }),
+      setBadge(tabId, false),
+    ]);
+    throw error;
+  }
 }
 
 async function deactivateControl(reason, notifyPanel = false) {
   const previousTabId = control.targetTabId;
   control.active = false;
   control.targetTabId = null;
+
+  let persistenceError = null;
+  try {
+    await persistControl();
+  } catch (error) {
+    persistenceError = error;
+  }
 
   if (Number.isInteger(previousTabId)) {
     await sendToTab(previousTabId, { type: "CONTROL_STATE", active: false }).catch(() => {});
@@ -101,6 +143,8 @@ async function deactivateControl(reason, notifyPanel = false) {
   if (notifyPanel) {
     chrome.runtime.sendMessage({ type: "CONTROL_FORCED_STOP", reason }).catch(() => {});
   }
+
+  if (persistenceError) throw persistenceError;
 }
 
 async function forwardGesture(action) {
@@ -142,6 +186,29 @@ async function ensureContentScript(tabId) {
       );
     }
     throw new Error("Comfort could not connect to this page. Reload the tab and try again.", { cause: error });
+  }
+}
+
+async function restoreControl() {
+  const stored = await chrome.storage.session.get(CONTROL_STATE_KEY);
+  const saved = stored[CONTROL_STATE_KEY];
+  if (saved?.active === true && Number.isInteger(saved.targetTabId)) {
+    control.active = true;
+    control.targetTabId = saved.targetTabId;
+  }
+}
+
+async function persistControl() {
+  await chrome.storage.session.set({ [CONTROL_STATE_KEY]: { ...control } });
+}
+
+async function resetControl() {
+  control.active = false;
+  control.targetTabId = null;
+  try {
+    await chrome.storage.session.remove(CONTROL_STATE_KEY);
+  } finally {
+    clearBadge();
   }
 }
 

@@ -9,6 +9,7 @@ const extensionApi = globalThis.__comfortChromeMock ?? chrome;
 const PROFILE_KEY = "comfortCalibrationProfile";
 const BASE_SCROLL_GAIN = DEFAULT_PROFILE.scrollGain;
 const CAMERA_FRAME_RATE = 24;
+const HIGHLIGHTED_TIPS = new Set([4, 8, 12]);
 const CONNECTIONS = [
   [0, 1], [1, 2], [2, 3], [3, 4],
   [0, 5], [5, 6], [6, 7], [7, 8],
@@ -95,6 +96,13 @@ extensionApi.runtime.onMessage.addListener((message) => {
 });
 
 window.addEventListener("pagehide", () => {
+  if (confirmedActive) {
+    void extensionApi.runtime.sendMessage({
+      type: "SET_CONTROL_STATE",
+      active: false,
+      reason: "panel-closed",
+    }).catch(() => {});
+  }
   cancelFrameLoop();
   gestureActions.clear();
   stream?.getTracks().forEach((track) => track.stop());
@@ -156,7 +164,7 @@ async function startCamera() {
     elements.cameraButton.innerHTML = '<span class="button-camera-icon" aria-hidden="true"></span>Disable camera';
     elements.calibrateButton.disabled = false;
     elements.gestureReadout.textContent = "Show your hand";
-    setNotice("Hold an open hand to start control.", "success");
+    setNotice("Hold a thumbs-up to start control.", "success");
     lastVideoTime = -1;
     scheduleNextFrame();
   } catch (error) {
@@ -375,7 +383,7 @@ async function stopControl(reason, resetEngine = true) {
     reason,
   }).catch(() => {});
 
-  if (reason === "fist") setNotice("Control stopped. Hold an open hand to start again.", "info");
+  if (reason === "fist") setNotice("Control stopped. Hold a thumbs-up to start again.", "info");
 }
 
 async function runCalibration() {
@@ -487,14 +495,14 @@ function drawLandmarks(landmarks) {
   context.fillStyle = "#4fe09b";
   context.beginPath();
   for (const [index, point] of landmarks.entries()) {
-    if (index === 8 || index === 12) continue;
+    if (HIGHLIGHTED_TIPS.has(index)) continue;
     context.moveTo(point.x * canvas.width + 3, point.y * canvas.height);
     context.arc(point.x * canvas.width, point.y * canvas.height, 3, 0, Math.PI * 2);
   }
   context.fill();
   context.fillStyle = "#f1fff8";
   context.beginPath();
-  for (const index of [8, 12]) {
+  for (const index of HIGHLIGHTED_TIPS) {
     const point = landmarks[index];
     context.moveTo(point.x * canvas.width + 5, point.y * canvas.height);
     context.arc(point.x * canvas.width, point.y * canvas.height, 5, 0, Math.PI * 2);

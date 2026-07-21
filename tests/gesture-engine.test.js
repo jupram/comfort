@@ -3,12 +3,39 @@ import { deriveCalibration } from "../src/calibration.js";
 import { GestureEngine } from "../src/gesture-engine.js";
 
 describe("GestureEngine", () => {
-  it("starts only after an open hand is held", () => {
+  it("starts only after a thumbs-up is held", () => {
     const engine = new GestureEngine({}, { startHoldMs: 500 });
-    expect(engine.update(openHand(), 0).active).toBe(false);
-    const result = engine.update(openHand(), 501);
+    expect(engine.update(thumbsUp(), 0).active).toBe(false);
+    const result = engine.update(thumbsUp(), 501);
     expect(result.active).toBe(true);
     expect(result.events).toContainEqual({ type: "CONTROL_STARTED" });
+  });
+
+  it("does not start for an open hand", () => {
+    const engine = new GestureEngine({}, { startHoldMs: 500 });
+    engine.update(openHand(), 0);
+    const result = engine.update(openHand(), 700);
+
+    expect(result.active).toBe(false);
+    expect(result.events).not.toContainEqual({ type: "CONTROL_STARTED" });
+  });
+
+  it("does not start for a sideways thumb", () => {
+    const engine = new GestureEngine({}, { startHoldMs: 500 });
+    engine.update(sidewaysThumb(), 0);
+    const result = engine.update(sidewaysThumb(), 700);
+
+    expect(result.active).toBe(false);
+    expect(result.events).not.toContainEqual({ type: "CONTROL_STARTED" });
+  });
+
+  it("does not interpret a held thumbs-up as a stop gesture", () => {
+    const engine = activeEngine();
+    engine.update(thumbsUp(), 600);
+    const result = engine.update(thumbsUp(), 1200);
+
+    expect(result.active).toBe(true);
+    expect(result.events).not.toContainEqual({ type: "CONTROL_STOPPED" });
   });
 
   it("blocks scrolling until control has started", () => {
@@ -100,8 +127,8 @@ describe("deriveCalibration", () => {
 
 function activeEngine() {
   const engine = new GestureEngine();
-  engine.update(openHand(), 0);
-  engine.update(openHand(), 501);
+  engine.update(thumbsUp(), 0);
+  engine.update(thumbsUp(), 501);
   return engine;
 }
 
@@ -111,6 +138,24 @@ function openHand() {
 
 function closedFist() {
   return makeHand([false, false, false, false]);
+}
+
+function thumbsUp() {
+  const points = makeHand([false, false, false, false]);
+  points[1] = { x: 0.43, y: 0.78, z: 0 };
+  points[2] = { x: 0.4, y: 0.67, z: 0 };
+  points[3] = { x: 0.4, y: 0.48, z: 0 };
+  points[4] = { x: 0.4, y: 0.27, z: 0 };
+  return points;
+}
+
+function sidewaysThumb() {
+  const points = makeHand([false, false, false, false]);
+  points[1] = { x: 0.43, y: 0.78, z: 0 };
+  points[2] = { x: 0.4, y: 0.67, z: 0 };
+  points[3] = { x: 0.28, y: 0.66, z: 0 };
+  points[4] = { x: 0.16, y: 0.65, z: 0 };
+  return points;
 }
 
 function twoFingers(yOffset = 0) {

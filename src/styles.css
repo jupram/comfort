@@ -280,7 +280,7 @@ input[type="range"] {
 .gesture-list strong { color: #d8e9e1; font-size: 10px; }
 .gesture-list small { margin-top: 2px; color: #789087; font-size: 9px; }
 .gesture-symbol { display: grid; place-items: center; flex: none; width: 27px; height: 27px; border: 1px solid rgba(82, 223, 157, .2); border-radius: 8px; color: #63dda6; background: rgba(44, 153, 105, .1); font-size: 16px; }
-.gesture-symbol.open { font-size: 15px; }
+.gesture-symbol.thumb { font-size: 15px; }
 .gesture-symbol.fist { font-size: 10px; }
 .gesture-symbol.pinch { font-size: 18px; }
 

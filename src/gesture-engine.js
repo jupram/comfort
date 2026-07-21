@@ -61,16 +61,16 @@ export class GestureEngine {
 
     const metrics = getFingerMetrics(landmarks);
     const fingers = metrics.map(isExtended);
-    const openHand = fingers.every(Boolean);
+    const thumbsUp = isThumbsUp(landmarks, metrics);
     const indexAndMiddleDeployed = isPinchFingerDeployed(metrics[0]) && isPinchFingerDeployed(metrics[1]);
     const ringAndPinkyFolded = isFolded(metrics[2]) && isFolded(metrics[3]);
     const pinchPose = indexAndMiddleDeployed && ringAndPinkyFolded;
-    const closedFist = metrics.every(isStronglyCurled) && !pinchPose;
+    const closedFist = metrics.every(isStronglyCurled) && !pinchPose && !thumbsUp;
     const twoFingerPose = fingers[0] && fingers[1] && !fingers[2] && !fingers[3];
     const pinchRatio = getPinchRatio(landmarks);
 
-    if (!this.active && openHand) {
-      if (this.holdPose("open", now, this.options.startHoldMs)) {
+    if (!this.active && thumbsUp) {
+      if (this.holdPose("thumbs-up", now, this.options.startHoldMs)) {
         this.active = true;
         this.resetInteractionState();
         events.push({ type: "CONTROL_STARTED" });
@@ -86,7 +86,7 @@ export class GestureEngine {
     }
 
     if (!this.active) {
-      return this.result(openHand ? "Hold open hand to start" : "Ready", pinchRatio, events);
+      return this.result(thumbsUp ? "Hold thumbs up to start" : "Ready", pinchRatio, events);
     }
 
     this.flushPendingSingleClick(now, events);
@@ -257,6 +257,32 @@ export function getPinchRatio(landmarks) {
   const palmWidth = distance(landmarks[5], landmarks[17]);
   if (palmWidth < 0.0001) return Number.POSITIVE_INFINITY;
   return distance(landmarks[8], landmarks[12]) / palmWidth;
+}
+
+export function isThumbsUp(landmarks, fingerMetrics = null) {
+  if (!Array.isArray(landmarks) || landmarks.length < 21) return false;
+
+  const metrics = fingerMetrics ?? getFingerMetrics(landmarks);
+  if (!metrics.every(isStronglyCurled)) return false;
+
+  const wrist = landmarks[0];
+  const thumbMcp = landmarks[2];
+  const thumbIp = landmarks[3];
+  const thumbTip = landmarks[4];
+  const palmHeight = distance(wrist, landmarks[9]);
+  const thumbLength = distance(thumbMcp, thumbIp) + distance(thumbIp, thumbTip);
+  const thumbReach = distance(thumbMcp, thumbTip);
+  if (palmHeight < 0.0001 || thumbLength < 0.0001 || thumbReach < 0.0001) return false;
+
+  const upwardReach = (thumbMcp.y - thumbTip.y) / palmHeight;
+  const verticalAlignment = (thumbMcp.y - thumbTip.y) / thumbReach;
+  const highestKnuckleY = Math.min(...MCP.map((index) => landmarks[index].y));
+
+  return jointAngle(thumbMcp, thumbIp, thumbTip) >= 145
+    && thumbReach / thumbLength >= 0.82
+    && upwardReach >= 0.55
+    && verticalAlignment >= 0.68
+    && thumbTip.y <= highestKnuckleY - palmHeight * 0.12;
 }
 
 function distance(a, b) {

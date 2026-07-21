@@ -35,9 +35,54 @@ describe("background content-script recovery", () => {
     expect(sendMessage).toHaveBeenCalledWith(17, { type: "COMFORT_PING" });
     expect(sendMessage).toHaveBeenCalledWith(17, { type: "CONTROL_STATE", active: true });
   });
+
+  it("restores active control after the service worker restarts", async () => {
+    const sessionState = {};
+    const firstListeners = {};
+    const firstSendMessage = vi.fn().mockResolvedValue({ ok: true });
+    globalThis.chrome = createChromeMock(firstListeners, firstSendMessage, vi.fn(), sessionState);
+    await import("../public/background.js");
+
+    const activation = await dispatchMessage(firstListeners, {
+      type: "SET_CONTROL_STATE",
+      active: true,
+      tabId: 17,
+    });
+    expect(activation).toMatchObject({ ok: true, active: true, targetTabId: 17 });
+    expect(sessionState.comfortControlState).toEqual({ active: true, targetTabId: 17 });
+
+    vi.resetModules();
+    const restartedListeners = {};
+    const restartedSendMessage = vi.fn().mockResolvedValue({ ok: true });
+    globalThis.chrome = createChromeMock(
+      restartedListeners,
+      restartedSendMessage,
+      vi.fn(),
+      sessionState,
+    );
+    await import("../public/background.js");
+
+    const response = await dispatchMessage(restartedListeners, {
+      type: "GESTURE_ACTION",
+      action: { type: "SINGLE_CLICK" },
+    });
+
+    expect(response).toEqual({ ok: true });
+    expect(restartedSendMessage).toHaveBeenCalledWith(17, {
+      type: "GESTURE_ACTION",
+      action: { type: "SINGLE_CLICK" },
+    });
+  });
 });
 
-function createChromeMock(listeners, sendMessage, executeScript) {
+function dispatchMessage(listeners, message) {
+  return new Promise((resolve) => {
+    const keepChannelOpen = listeners.onMessage(message, {}, resolve);
+    expect(keepChannelOpen).toBe(true);
+  });
+}
+
+function createChromeMock(listeners, sendMessage, executeScript, sessionState = {}) {
   return {
     action: {
       setBadgeBackgroundColor: vi.fn().mockResolvedValue(),
@@ -52,6 +97,13 @@ function createChromeMock(listeners, sendMessage, executeScript) {
     },
     scripting: { executeScript },
     sidePanel: { setPanelBehavior: vi.fn().mockResolvedValue() },
+    storage: {
+      session: {
+        get: vi.fn(async (key) => ({ [key]: sessionState[key] })),
+        remove: vi.fn(async (key) => { delete sessionState[key]; }),
+        set: vi.fn(async (values) => { Object.assign(sessionState, values); }),
+      },
+    },
     tabs: {
       get: vi.fn().mockResolvedValue({ id: 17, url: "https://example.com/" }),
       onActivated: { addListener: vi.fn((listener) => { listeners.onActivated = listener; }) },
