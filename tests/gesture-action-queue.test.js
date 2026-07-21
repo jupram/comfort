@@ -44,7 +44,7 @@ describe("GestureActionQueue", () => {
     const queue = new GestureActionQueue(send, onError);
 
     queue.enqueue({ type: "SCROLL", delta: 5 });
-    queue.enqueue({ type: "DOUBLE_CLICK" });
+    queue.enqueue({ type: "BROWSER_BACK" });
     await queue.whenIdle();
 
     expect(send).toHaveBeenCalledTimes(1);

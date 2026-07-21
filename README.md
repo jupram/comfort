@@ -1,6 +1,6 @@
 # Comfort Gesture Control
 
-A Chrome/Edge Manifest V3 extension that lets you scroll and click the current page with a small set of camera-detected hand gestures. Processing stays in the extension: the MediaPipe runtime and hand model are packaged locally.
+A Chrome/Edge Manifest V3 extension that lets you scroll, click, and navigate the current tab with a small set of camera-detected hand gestures. Processing stays in the extension: the MediaPipe runtime and hand model are packaged locally.
 
 ## Gestures
 
@@ -11,9 +11,9 @@ A Chrome/Edge Manifest V3 extension that lets you scroll and click the current p
 | Extend index + middle fingers and slide down | Scroll down |
 | Extend index + middle fingers and slide up | Scroll up |
 | Pinch index + middle fingertips once | Click at the center reticle |
-| Pinch index + middle fingertips twice | Double-click at the center reticle |
+| Point the index finger left with the thumb up and other fingers curled | Browser back |
 
-Scrolling and clicking are ignored until the thumbs-up start gesture has been accepted. A green page-edge halo and an `ON` toolbar badge identify the controlled tab. Changing tabs or closing the side panel stops control automatically.
+Scrolling, clicking, and browser navigation are ignored until the thumbs-up start gesture has been accepted. A green page-edge halo and an `ON` toolbar badge identify the controlled tab. Changing tabs or closing the side panel stops control automatically.
 
 ## Build and load
 

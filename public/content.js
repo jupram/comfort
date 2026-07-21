@@ -133,8 +133,7 @@
       return;
     }
 
-    if (action.type === "SINGLE_CLICK") clickAtReticle(false);
-    if (action.type === "DOUBLE_CLICK") clickAtReticle(true);
+    if (action.type === "SINGLE_CLICK") clickAtReticle();
   }
 
   function scrollAtReticle(delta) {
@@ -190,7 +189,7 @@
     return cachedScrollTarget;
   }
 
-  function clickAtReticle(doubleClick) {
+  function clickAtReticle() {
     const x = innerWidth / 2;
     const y = innerHeight / 2;
     const hit = document.elementFromPoint(x, y);
@@ -201,18 +200,11 @@
       target.focus({ preventScroll: true });
     }
 
-    const clicks = doubleClick ? 2 : 1;
-    for (let detail = 1; detail <= clicks; detail += 1) {
-      dispatchPointerSequence(target, x, y, detail);
-      if (typeof target.click === "function") {
-        target.click();
-      } else {
-        target.dispatchEvent(new MouseEvent("click", mouseOptions(x, y, detail)));
-      }
-    }
-
-    if (doubleClick) {
-      target.dispatchEvent(new MouseEvent("dblclick", mouseOptions(x, y, 2)));
+    dispatchPointerSequence(target, x, y, 1);
+    if (typeof target.click === "function") {
+      target.click();
+    } else {
+      target.dispatchEvent(new MouseEvent("click", mouseOptions(x, y, 1)));
     }
 
     reticle?.classList.add("flash");

@@ -52,30 +52,80 @@ describe("GestureEngine", () => {
     const down = engine.update(twoFingers(0.03), 616);
     expect(down.events.find((event) => event.type === "SCROLL").delta).toBeGreaterThan(0);
 
-    const up = engine.update(twoFingers(-0.01), 632);
+    const up = engine.update(twoFingers(-0.01), 1216);
     expect(up.events.find((event) => event.type === "SCROLL").delta).toBeLessThan(0);
   });
 
-  it("delays a single pinch so it can distinguish a double pinch", () => {
+  it("waits 600 ms before changing from scrolling down to up", () => {
+    const engine = activeEngine();
+    engine.update(twoFingers(0), 600);
+
+    expect(scrollDelta(engine.update(twoFingers(0.03), 616))).toBeGreaterThan(0);
+    expect(scrollDelta(engine.update(twoFingers(0), 800))).toBeUndefined();
+    expect(scrollDelta(engine.update(twoFingers(-0.03), 1215))).toBeUndefined();
+    expect(scrollDelta(engine.update(twoFingers(-0.06), 1216))).toBeLessThan(0);
+  });
+
+  it("waits 600 ms before changing from scrolling up to down", () => {
+    const engine = activeEngine();
+    engine.update(twoFingers(0), 600);
+
+    expect(scrollDelta(engine.update(twoFingers(-0.03), 616))).toBeLessThan(0);
+    expect(scrollDelta(engine.update(twoFingers(0), 800))).toBeUndefined();
+    expect(scrollDelta(engine.update(twoFingers(0.03), 1215))).toBeUndefined();
+    expect(scrollDelta(engine.update(twoFingers(0.06), 1216))).toBeGreaterThan(0);
+  });
+
+  it("continues scrolling in the same direction without the direction-change delay", () => {
+    const engine = activeEngine();
+    engine.update(twoFingers(0), 600);
+
+    expect(scrollDelta(engine.update(twoFingers(0.03), 616))).toBeGreaterThan(0);
+    expect(scrollDelta(engine.update(twoFingers(0.06), 632))).toBeGreaterThan(0);
+  });
+
+  it("turns a held pinch into a single click", () => {
     const engine = activeEngine();
     engine.update(pinchedFingers(), 600);
-    engine.update(pinchedFingers(), 675);
-    engine.update(twoFingers(), 700);
-    engine.update(twoFingers(), 760);
-    const result = engine.update(twoFingers(), 1100);
+    const result = engine.update(pinchedFingers(), 675);
     expect(result.events).toContainEqual({ type: "SINGLE_CLICK" });
   });
 
-  it("turns two pinches into one double-click", () => {
+  it("treats two pinches as two single clicks", () => {
     const engine = activeEngine();
     engine.update(pinchedFingers(), 600);
-    engine.update(pinchedFingers(), 675);
+    const first = engine.update(pinchedFingers(), 675);
     engine.update(twoFingers(), 700);
     engine.update(twoFingers(), 760);
     engine.update(pinchedFingers(), 800);
-    const result = engine.update(pinchedFingers(), 875);
-    expect(result.events).toContainEqual({ type: "DOUBLE_CLICK" });
-    expect(result.events).not.toContainEqual({ type: "SINGLE_CLICK" });
+    const second = engine.update(pinchedFingers(), 875);
+
+    expect(first.events).toContainEqual({ type: "SINGLE_CLICK" });
+    expect(second.events).toContainEqual({ type: "SINGLE_CLICK" });
+  });
+
+  it("goes back after the left-pointing gesture is held", () => {
+    const engine = activeEngine();
+
+    expect(engine.update(pointingLeft(), 600).events).not.toContainEqual({ type: "BROWSER_BACK" });
+    expect(engine.update(pointingLeft(), 899).events).not.toContainEqual({ type: "BROWSER_BACK" });
+    const result = engine.update(pointingLeft(), 900);
+
+    expect(result.pose).toBe("Hold pointing left for browser back");
+    expect(result.events).toContainEqual({ type: "BROWSER_BACK" });
+    expect(engine.update(pointingLeft(), 1200).events).not.toContainEqual({ type: "BROWSER_BACK" });
+  });
+
+  it("does not navigate back before control starts or when pointing right", () => {
+    const inactiveEngine = new GestureEngine();
+    inactiveEngine.update(pointingLeft(), 0);
+    expect(inactiveEngine.update(pointingLeft(), 500).events).not.toContainEqual({
+      type: "BROWSER_BACK",
+    });
+
+    const engine = activeEngine();
+    engine.update(pointingRight(), 600);
+    expect(engine.update(pointingRight(), 1000).events).not.toContainEqual({ type: "BROWSER_BACK" });
   });
 
   it("does not stop control while a pinch is held", () => {
@@ -95,7 +145,6 @@ describe("GestureEngine", () => {
     const result = engine.update(twoFingers(), 1100);
 
     expect(result.events).not.toContainEqual({ type: "SINGLE_CLICK" });
-    expect(result.events).not.toContainEqual({ type: "DOUBLE_CLICK" });
   });
 
   it("stops after a closed fist is held", () => {
@@ -132,6 +181,10 @@ function activeEngine() {
   return engine;
 }
 
+function scrollDelta(result) {
+  return result.events.find((event) => event.type === "SCROLL")?.delta;
+}
+
 function openHand() {
   return makeHand([true, true, true, true]);
 }
@@ -155,6 +208,22 @@ function sidewaysThumb() {
   points[2] = { x: 0.4, y: 0.67, z: 0 };
   points[3] = { x: 0.28, y: 0.66, z: 0 };
   points[4] = { x: 0.16, y: 0.65, z: 0 };
+  return points;
+}
+
+function pointingLeft() {
+  const points = thumbsUp();
+  points[6] = { x: 0.55, y: 0.65, z: 0 };
+  points[7] = { x: 0.68, y: 0.62, z: 0 };
+  points[8] = { x: 0.82, y: 0.6, z: 0 };
+  return points;
+}
+
+function pointingRight() {
+  const points = thumbsUp();
+  points[6] = { x: 0.3, y: 0.65, z: 0 };
+  points[7] = { x: 0.18, y: 0.62, z: 0 };
+  points[8] = { x: 0.06, y: 0.6, z: 0 };
   return points;
 }
 

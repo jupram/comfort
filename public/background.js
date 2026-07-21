@@ -152,6 +152,11 @@ async function forwardGesture(action) {
     throw new Error("Control is not active.");
   }
 
+  if (action?.type === "BROWSER_BACK") {
+    await chrome.tabs.goBack(control.targetTabId);
+    return;
+  }
+
   const message = { type: "GESTURE_ACTION", action };
 
   try {
