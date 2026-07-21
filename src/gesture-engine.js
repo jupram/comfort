@@ -15,9 +15,10 @@ export class GestureEngine {
     this.options = {
       startHoldMs: 500,
       stopHoldMs: 500,
-      doubleClickMs: 380,
+      browserBackHoldMs: 300,
       pinchHoldMs: 70,
       pinchReleaseMs: 55,
+      scrollDirectionChangeDelayMs: 600,
       movementDeadZone: 0.0025,
       maxScrollStep: 72,
       ...options,
@@ -27,10 +28,11 @@ export class GestureEngine {
     this.poseSince = 0;
     this.poseLatched = null;
     this.previousFingerY = null;
+    this.lastScrollDirection = null;
+    this.lastScrollAt = null;
     this.pinchDown = false;
     this.pinchCandidateSince = null;
     this.pinchReleaseSince = null;
-    this.pendingPinchAt = null;
   }
 
   setProfile(profile) {
@@ -55,7 +57,6 @@ export class GestureEngine {
       this.pinchCandidateSince = null;
       this.pinchReleaseSince = null;
       this.resetPoseState();
-      this.flushPendingSingleClick(now, events);
       return this.result("No hand", null, events);
     }
 
@@ -66,6 +67,7 @@ export class GestureEngine {
     const ringAndPinkyFolded = isFolded(metrics[2]) && isFolded(metrics[3]);
     const pinchPose = indexAndMiddleDeployed && ringAndPinkyFolded;
     const closedFist = metrics.every(isStronglyCurled) && !pinchPose && !thumbsUp;
+    const browserBackPose = isBrowserBackPose(landmarks, metrics);
     const twoFingerPose = fingers[0] && fingers[1] && !fingers[2] && !fingers[3];
     const pinchRatio = getPinchRatio(landmarks);
 
@@ -81,6 +83,10 @@ export class GestureEngine {
         this.resetInteractionState();
         events.push({ type: "CONTROL_STOPPED" });
       }
+    } else if (this.active && browserBackPose) {
+      if (this.holdPose("browser-back", now, this.options.browserBackHoldMs)) {
+        events.push({ type: "BROWSER_BACK" });
+      }
     } else {
       this.resetPoseState();
     }
@@ -88,8 +94,6 @@ export class GestureEngine {
     if (!this.active) {
       return this.result(thumbsUp ? "Hold thumbs up to start" : "Ready", pinchRatio, events);
     }
-
-    this.flushPendingSingleClick(now, events);
 
     if (pinchPose) {
       this.updatePinchState(pinchRatio, now, events);
@@ -109,7 +113,9 @@ export class GestureEngine {
               -this.options.maxScrollStep,
               this.options.maxScrollStep,
             );
-            events.push({ type: "SCROLL", delta });
+            if (this.canScrollInDirection(delta, now)) {
+              events.push({ type: "SCROLL", delta });
+            }
           }
         }
         this.previousFingerY = meanY;
@@ -120,11 +126,13 @@ export class GestureEngine {
 
     const pose = closedFist
       ? "Hold fist to stop"
-      : this.pinchDown || (pinchPose && pinchRatio <= this.profile.pinchEnter)
-        ? "Pinch"
-        : twoFingerPose
-          ? "Two-finger scroll"
-          : "Control active";
+      : browserBackPose
+        ? "Hold pointing left for browser back"
+        : this.pinchDown || (pinchPose && pinchRatio <= this.profile.pinchEnter)
+          ? "Pinch"
+          : twoFingerPose
+            ? "Two-finger scroll"
+            : "Control active";
 
     return this.result(pose, pinchRatio, events);
   }
@@ -160,16 +168,7 @@ export class GestureEngine {
       this.pinchCandidateSince = null;
       this.pinchReleaseSince = null;
       this.previousFingerY = null;
-
-      if (
-        this.pendingPinchAt !== null &&
-        now - this.pendingPinchAt <= this.options.doubleClickMs
-      ) {
-        this.pendingPinchAt = null;
-        events.push({ type: "DOUBLE_CLICK" });
-      } else {
-        this.pendingPinchAt = now;
-      }
+      events.push({ type: "SINGLE_CLICK" });
       return;
     }
 
@@ -194,23 +193,31 @@ export class GestureEngine {
     }
   }
 
-  flushPendingSingleClick(now, events) {
+  canScrollInDirection(delta, now) {
+    const direction = Math.sign(delta);
+    if (direction === 0) return false;
+
+    const changingDirection = this.lastScrollDirection !== null
+      && direction !== this.lastScrollDirection;
     if (
-      this.pendingPinchAt !== null &&
-      !this.pinchDown &&
-      now - this.pendingPinchAt > this.options.doubleClickMs
+      changingDirection
+      && now - this.lastScrollAt < this.options.scrollDirectionChangeDelayMs
     ) {
-      this.pendingPinchAt = null;
-      events.push({ type: "SINGLE_CLICK" });
+      return false;
     }
+
+    this.lastScrollDirection = direction;
+    this.lastScrollAt = now;
+    return true;
   }
 
   resetInteractionState() {
     this.previousFingerY = null;
+    this.lastScrollDirection = null;
+    this.lastScrollAt = null;
     this.pinchDown = false;
     this.pinchCandidateSince = null;
     this.pinchReleaseSince = null;
-    this.pendingPinchAt = null;
   }
 
   resetPoseState() {
@@ -264,6 +271,31 @@ export function isThumbsUp(landmarks, fingerMetrics = null) {
 
   const metrics = fingerMetrics ?? getFingerMetrics(landmarks);
   if (!metrics.every(isStronglyCurled)) return false;
+
+  return hasRaisedThumb(landmarks);
+}
+
+export function isBrowserBackPose(landmarks, fingerMetrics = null) {
+  if (!Array.isArray(landmarks) || landmarks.length < 21) return false;
+
+  const metrics = fingerMetrics ?? getFingerMetrics(landmarks);
+  if (!isExtended(metrics[0]) || !metrics.slice(1).every(isStronglyCurled)) return false;
+  if (!hasRaisedThumb(landmarks)) return false;
+
+  const indexMcp = landmarks[5];
+  const indexTip = landmarks[8];
+  const palmWidth = distance(landmarks[5], landmarks[17]);
+  const indexReach = distance(indexMcp, indexTip);
+  if (palmWidth < 0.0001 || indexReach < 0.0001) return false;
+
+  // The preview is mirrored, so increasing landmark X points left on screen.
+  const previewLeftReach = (indexTip.x - indexMcp.x) / palmWidth;
+  const horizontalAlignment = (indexTip.x - indexMcp.x) / indexReach;
+
+  return previewLeftReach >= 0.85 && horizontalAlignment >= 0.78;
+}
+
+function hasRaisedThumb(landmarks) {
 
   const wrist = landmarks[0];
   const thumbMcp = landmarks[2];

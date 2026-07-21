@@ -73,6 +73,30 @@ describe("background content-script recovery", () => {
       action: { type: "SINGLE_CLICK" },
     });
   });
+
+  it("uses the browser tab history for the back gesture", async () => {
+    const listeners = {};
+    const sendMessage = vi.fn().mockResolvedValue({ ok: true });
+    const goBack = vi.fn().mockResolvedValue();
+    globalThis.chrome = createChromeMock(listeners, sendMessage, vi.fn(), {}, goBack);
+    await import("../public/background.js");
+
+    await dispatchMessage(listeners, {
+      type: "SET_CONTROL_STATE",
+      active: true,
+      tabId: 17,
+    });
+    sendMessage.mockClear();
+
+    const response = await dispatchMessage(listeners, {
+      type: "GESTURE_ACTION",
+      action: { type: "BROWSER_BACK" },
+    });
+
+    expect(response).toEqual({ ok: true });
+    expect(goBack).toHaveBeenCalledWith(17);
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
 });
 
 function dispatchMessage(listeners, message) {
@@ -82,7 +106,7 @@ function dispatchMessage(listeners, message) {
   });
 }
 
-function createChromeMock(listeners, sendMessage, executeScript, sessionState = {}) {
+function createChromeMock(listeners, sendMessage, executeScript, sessionState = {}, goBack = vi.fn()) {
   return {
     action: {
       setBadgeBackgroundColor: vi.fn().mockResolvedValue(),
@@ -106,6 +130,7 @@ function createChromeMock(listeners, sendMessage, executeScript, sessionState = 
     },
     tabs: {
       get: vi.fn().mockResolvedValue({ id: 17, url: "https://example.com/" }),
+      goBack,
       onActivated: { addListener: vi.fn((listener) => { listeners.onActivated = listener; }) },
       onRemoved: { addListener: vi.fn((listener) => { listeners.onRemoved = listener; }) },
       onUpdated: { addListener: vi.fn((listener) => { listeners.onUpdated = listener; }) },
