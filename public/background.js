@@ -136,9 +136,12 @@ async function ensureContentScript(tabId) {
   } catch (error) {
     const detail = error?.message || "Unknown browser error";
     if (/cannot access|missing host permission|not allowed|chrome:\/\/|edge:\/\//i.test(detail)) {
-      throw new Error("This browser page is protected and does not allow gesture control. Open a regular website and try again.");
+      throw new Error(
+        "This browser page is protected and does not allow gesture control. Open a regular website and try again.",
+        { cause: error },
+      );
     }
-    throw new Error("Comfort could not connect to this page. Reload the tab and try again.");
+    throw new Error("Comfort could not connect to this page. Reload the tab and try again.", { cause: error });
   }
 }
 

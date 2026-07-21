@@ -6,7 +6,10 @@
   const HOST_ID = "comfort-gesture-control-root";
   let host = null;
   let reticle = null;
-  let halo = null;
+  let pendingScrollDelta = 0;
+  let scrollFrameId = null;
+  let cachedScrollTarget = null;
+  let scrollTargetExpiresAt = 0;
 
   extensionApi.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type === "COMFORT_PING") {
@@ -100,7 +103,7 @@
       }
     `;
 
-    halo = document.createElement("div");
+    const halo = document.createElement("div");
     halo.className = "halo";
     halo.setAttribute("aria-hidden", "true");
 
@@ -119,6 +122,7 @@
   function setControlActive(active) {
     ensureOverlay();
     host.style.display = active ? "block" : "none";
+    if (!active) resetPendingScroll();
   }
 
   function performAction(action) {
@@ -135,7 +139,17 @@
 
   function scrollAtReticle(delta) {
     if (Math.abs(delta) < 1) return;
-    const target = getScrollTarget();
+    pendingScrollDelta += delta;
+    if (scrollFrameId === null) scrollFrameId = requestAnimationFrame(flushScroll);
+  }
+
+  function flushScroll() {
+    scrollFrameId = null;
+    const delta = pendingScrollDelta;
+    pendingScrollDelta = 0;
+    if (!host || host.style.display === "none" || Math.abs(delta) < 1) return;
+
+    const target = getScrollTarget(performance.now());
     if (target === document.scrollingElement) {
       window.scrollBy({ top: delta, left: 0, behavior: "auto" });
     } else {
@@ -143,15 +157,37 @@
     }
   }
 
-  function getScrollTarget() {
+  function resetPendingScroll() {
+    if (scrollFrameId !== null) cancelAnimationFrame(scrollFrameId);
+    scrollFrameId = null;
+    pendingScrollDelta = 0;
+    cachedScrollTarget = null;
+    scrollTargetExpiresAt = 0;
+  }
+
+  function getScrollTarget(now) {
+    if (
+      cachedScrollTarget?.isConnected &&
+      now < scrollTargetExpiresAt &&
+      cachedScrollTarget.scrollHeight > cachedScrollTarget.clientHeight + 2
+    ) {
+      return cachedScrollTarget;
+    }
+
     let element = document.elementFromPoint(innerWidth / 2, innerHeight / 2);
     while (element && element !== document.documentElement) {
       const style = getComputedStyle(element);
       const canScroll = /(auto|scroll)/.test(style.overflowY) && element.scrollHeight > element.clientHeight + 2;
-      if (canScroll) return element;
+      if (canScroll) {
+        cachedScrollTarget = element;
+        scrollTargetExpiresAt = now + 250;
+        return element;
+      }
       element = element.parentElement;
     }
-    return document.scrollingElement || document.documentElement;
+    cachedScrollTarget = document.scrollingElement || document.documentElement;
+    scrollTargetExpiresAt = now + 250;
+    return cachedScrollTarget;
   }
 
   function clickAtReticle(doubleClick) {

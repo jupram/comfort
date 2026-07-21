@@ -1,12 +1,14 @@
 import { FilesetResolver, HandLandmarker } from "@mediapipe/tasks-vision";
 import "./styles.css";
 import { deriveCalibration } from "./calibration.js";
+import { GestureActionQueue } from "./gesture-action-queue.js";
 import { DEFAULT_PROFILE, GestureEngine, getPinchRatio } from "./gesture-engine.js";
 
 const extensionApi = globalThis.__comfortChromeMock ?? chrome;
 
 const PROFILE_KEY = "comfortCalibrationProfile";
 const BASE_SCROLL_GAIN = DEFAULT_PROFILE.scrollGain;
+const CAMERA_FRAME_RATE = 24;
 const CONNECTIONS = [
   [0, 1], [1, 2], [2, 3], [3, 4],
   [0, 5], [5, 6], [6, 7], [7, 8],
@@ -32,12 +34,16 @@ const elements = {
   scrollSpeed: document.querySelector("#scroll-speed"),
   speedOutput: document.querySelector("#speed-output"),
 };
+const landmarkContext = elements.canvas.getContext("2d");
+
+if (!landmarkContext) throw new Error("Canvas rendering is unavailable.");
 
 let profile = { ...DEFAULT_PROFILE };
 let engine = new GestureEngine(profile);
 let handLandmarker = null;
 let stream = null;
 let animationFrameId = null;
+let videoFrameCallbackId = null;
 let lastVideoTime = -1;
 let cameraReady = false;
 let confirmedActive = false;
@@ -46,8 +52,11 @@ let calibrationRunning = false;
 let handlingControlChange = false;
 
 const panelPort = extensionApi.runtime.connect({ name: "comfort-control-panel" });
+const gestureActions = new GestureActionQueue(sendGestureAction, handleGestureDeliveryError);
 
-void initialize();
+void initialize().catch((error) => {
+  setNotice(`Could not initialize Comfort: ${error?.message || "Unknown error"}`, "error");
+});
 
 elements.cameraButton.addEventListener("click", () => {
   if (cameraReady) void stopCamera();
@@ -86,9 +95,20 @@ extensionApi.runtime.onMessage.addListener((message) => {
 });
 
 window.addEventListener("pagehide", () => {
-  if (animationFrameId !== null) cancelAnimationFrame(animationFrameId);
+  cancelFrameLoop();
+  gestureActions.clear();
   stream?.getTracks().forEach((track) => track.stop());
-  panelPort.disconnect();
+  try {
+    handLandmarker?.close();
+  } catch {
+    // The detector may already be disposed after a runtime failure.
+  }
+  handLandmarker = null;
+  try {
+    panelPort.disconnect();
+  } catch {
+    // The service worker may already have disconnected the port.
+  }
 });
 
 async function initialize() {
@@ -120,7 +140,7 @@ async function startCamera() {
         facingMode: "user",
         width: { ideal: 640 },
         height: { ideal: 480 },
-        frameRate: { ideal: 30, max: 30 },
+        frameRate: { ideal: CAMERA_FRAME_RATE, max: CAMERA_FRAME_RATE },
       },
     });
 
@@ -138,7 +158,7 @@ async function startCamera() {
     elements.gestureReadout.textContent = "Show your hand";
     setNotice("Hold an open hand to start control.", "success");
     lastVideoTime = -1;
-    animationFrameId = requestAnimationFrame(processFrame);
+    scheduleNextFrame();
   } catch (error) {
     stream?.getTracks().forEach((track) => track.stop());
     stream = null;
@@ -168,8 +188,7 @@ async function stopCamera() {
   elements.cameraButton.disabled = true;
   await stopControl("camera-off");
 
-  if (animationFrameId !== null) cancelAnimationFrame(animationFrameId);
-  animationFrameId = null;
+  cancelFrameLoop();
   stream?.getTracks().forEach((track) => track.stop());
   stream = null;
   elements.video.srcObject = null;
@@ -212,29 +231,79 @@ async function ensureHandLandmarker() {
   return handLandmarker;
 }
 
+function scheduleNextFrame() {
+  if (!cameraReady) return;
+  if (typeof elements.video.requestVideoFrameCallback === "function") {
+    videoFrameCallbackId = elements.video.requestVideoFrameCallback(processFrame);
+  } else {
+    animationFrameId = requestAnimationFrame(processFrame);
+  }
+}
+
+function cancelFrameLoop() {
+  if (animationFrameId !== null) cancelAnimationFrame(animationFrameId);
+  if (videoFrameCallbackId !== null && typeof elements.video.cancelVideoFrameCallback === "function") {
+    elements.video.cancelVideoFrameCallback(videoFrameCallbackId);
+  }
+  animationFrameId = null;
+  videoFrameCallbackId = null;
+}
+
 function processFrame(timestamp) {
+  animationFrameId = null;
+  videoFrameCallbackId = null;
   if (!cameraReady || !handLandmarker) return;
 
-  if (elements.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && elements.video.currentTime !== lastVideoTime) {
-    lastVideoTime = elements.video.currentTime;
-    const result = handLandmarker.detectForVideo(elements.video, timestamp);
-    const landmarks = result.landmarks?.[0] ?? null;
-    drawLandmarks(landmarks);
-    updateHandVisibility(Boolean(landmarks));
+  try {
+    if (elements.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && elements.video.currentTime !== lastVideoTime) {
+      lastVideoTime = elements.video.currentTime;
+      const result = handLandmarker.detectForVideo(elements.video, timestamp);
+      const landmarks = result.landmarks?.[0] ?? null;
+      drawLandmarks(landmarks);
+      updateHandVisibility(Boolean(landmarks));
 
-    if (calibrationSession) {
-      if (calibrationSession.collecting && landmarks) {
-        const ratio = getPinchRatio(landmarks);
-        if (Number.isFinite(ratio)) calibrationSession.samples.push(ratio);
+      if (calibrationSession) {
+        if (calibrationSession.collecting && landmarks) {
+          const ratio = getPinchRatio(landmarks);
+          if (Number.isFinite(ratio)) calibrationSession.samples.push(ratio);
+        }
+      } else {
+        const recognition = engine.update(landmarks, timestamp);
+        setText(elements.gestureReadout, recognition.pose);
+        for (const event of recognition.events) void handleGestureEvent(event);
       }
-    } else {
-      const recognition = engine.update(landmarks, timestamp);
-      elements.gestureReadout.textContent = recognition.pose;
-      for (const event of recognition.events) void handleGestureEvent(event);
     }
+  } catch (error) {
+    void handleTrackingFailure(error);
+    return;
   }
 
-  animationFrameId = requestAnimationFrame(processFrame);
+  scheduleNextFrame();
+}
+
+async function handleTrackingFailure(error) {
+  cameraReady = false;
+  cancelFrameLoop();
+  gestureActions.clear();
+  stream?.getTracks().forEach((track) => track.stop());
+  stream = null;
+  elements.video.srcObject = null;
+  clearCanvas();
+  try {
+    handLandmarker?.close();
+  } catch {
+    // The detector may already have disposed itself when it failed.
+  }
+  handLandmarker = null;
+  await stopControl("tracking-error");
+
+  elements.cameraCard.dataset.ready = "false";
+  elements.cameraButton.innerHTML = '<span class="button-camera-icon" aria-hidden="true"></span>Enable camera';
+  elements.cameraButton.disabled = false;
+  elements.calibrateButton.disabled = true;
+  updateHandVisibility(false);
+  setText(elements.gestureReadout, "Tracking stopped");
+  setNotice(`Hand tracking stopped: ${error?.message || "Unknown error"}. Enable the camera to retry.`, "error");
 }
 
 async function handleGestureEvent(event) {
@@ -254,20 +323,23 @@ async function handleGestureEvent(event) {
     ? { type: "SCROLL", delta: event.delta }
     : { type: event.type };
 
-  const response = await extensionApi.runtime.sendMessage({
-    type: "GESTURE_ACTION",
-    action,
-  }).catch((error) => ({ ok: false, error: error.message }));
+  gestureActions.enqueue(action);
+}
 
-  if (response && !response.ok) {
-    await stopControl("target-unavailable");
-    setNotice(response.error || "The controlled page is unavailable.", "error");
-  }
+async function sendGestureAction(action) {
+  const response = await extensionApi.runtime.sendMessage({ type: "GESTURE_ACTION", action });
+  if (!response?.ok) throw new Error(response?.error || "The controlled page is unavailable.");
+}
+
+async function handleGestureDeliveryError(error) {
+  await stopControl("target-unavailable");
+  setNotice(error?.message || "The controlled page is unavailable.", "error");
 }
 
 async function startControl() {
   if (handlingControlChange || confirmedActive) return;
   handlingControlChange = true;
+  gestureActions.clear();
 
   try {
     const [tab] = await extensionApi.tabs.query({ active: true, currentWindow: true });
@@ -292,6 +364,7 @@ async function startControl() {
 }
 
 async function stopControl(reason, resetEngine = true) {
+  gestureActions.clear();
   if (resetEngine) engine.forceStop();
   confirmedActive = false;
   setActiveUi(false);
@@ -334,7 +407,7 @@ async function runCalibration() {
   } finally {
     calibrationSession = null;
     calibrationRunning = false;
-    elements.calibrateButton.disabled = false;
+    elements.calibrateButton.disabled = !cameraReady;
     elements.cameraButton.disabled = false;
     elements.scrollSpeed.disabled = false;
   }
@@ -345,11 +418,19 @@ async function collectCalibrationPhase(instruction, readout) {
   setNotice(`${instruction} Get ready…`, "info");
   calibrationSession = { collecting: false, samples: [] };
   await delay(900);
+  assertCalibrationAvailable();
   setNotice(`${instruction} Hold still.`, "success");
   calibrationSession.collecting = true;
   await delay(1700);
+  assertCalibrationAvailable();
   calibrationSession.collecting = false;
   return calibrationSession.samples;
+}
+
+function assertCalibrationAvailable() {
+  if (!cameraReady || !calibrationSession) {
+    throw new Error("Calibration stopped because hand tracking became unavailable.");
+  }
 }
 
 async function saveProfile() {
@@ -369,8 +450,9 @@ function setNotice(message, kind) {
 }
 
 function updateHandVisibility(visible) {
-  elements.handIndicator.dataset.visible = String(visible);
-  elements.handIndicator.textContent = visible ? "Hand found" : "No hand";
+  const value = String(visible);
+  if (elements.handIndicator.dataset.visible !== value) elements.handIndicator.dataset.visible = value;
+  setText(elements.handIndicator, visible ? "Hand found" : "No hand");
 }
 
 function resizeCanvas() {
@@ -379,13 +461,12 @@ function resizeCanvas() {
 }
 
 function clearCanvas() {
-  const context = elements.canvas.getContext("2d");
-  context.clearRect(0, 0, elements.canvas.width, elements.canvas.height);
+  landmarkContext.clearRect(0, 0, elements.canvas.width, elements.canvas.height);
 }
 
 function drawLandmarks(landmarks) {
   const canvas = elements.canvas;
-  const context = canvas.getContext("2d");
+  const context = landmarkContext;
   if (canvas.width !== elements.video.videoWidth && elements.video.videoWidth) resizeCanvas();
   context.clearRect(0, 0, canvas.width, canvas.height);
   if (!landmarks) return;
@@ -396,20 +477,34 @@ function drawLandmarks(landmarks) {
   context.lineWidth = 2;
   context.strokeStyle = "rgba(75, 224, 156, .72)";
 
+  context.beginPath();
   for (const [start, end] of CONNECTIONS) {
-    context.beginPath();
     context.moveTo(landmarks[start].x * canvas.width, landmarks[start].y * canvas.height);
     context.lineTo(landmarks[end].x * canvas.width, landmarks[end].y * canvas.height);
-    context.stroke();
   }
+  context.stroke();
 
+  context.fillStyle = "#4fe09b";
+  context.beginPath();
   for (const [index, point] of landmarks.entries()) {
-    context.beginPath();
-    context.arc(point.x * canvas.width, point.y * canvas.height, index === 8 || index === 12 ? 5 : 3, 0, Math.PI * 2);
-    context.fillStyle = index === 8 || index === 12 ? "#f1fff8" : "#4fe09b";
-    context.fill();
+    if (index === 8 || index === 12) continue;
+    context.moveTo(point.x * canvas.width + 3, point.y * canvas.height);
+    context.arc(point.x * canvas.width, point.y * canvas.height, 3, 0, Math.PI * 2);
   }
+  context.fill();
+  context.fillStyle = "#f1fff8";
+  context.beginPath();
+  for (const index of [8, 12]) {
+    const point = landmarks[index];
+    context.moveTo(point.x * canvas.width + 5, point.y * canvas.height);
+    context.arc(point.x * canvas.width, point.y * canvas.height, 5, 0, Math.PI * 2);
+  }
+  context.fill();
   context.restore();
+}
+
+function setText(element, value) {
+  if (element.textContent !== value) element.textContent = value;
 }
 
 function cameraErrorMessage(error) {

@@ -37,8 +37,7 @@ If camera access is blocked, the side panel shows **Open camera permission**. Us
 ## Development
 
 ```powershell
-npm.cmd test
-npm.cmd run build
+npm.cmd run check
 ```
 
 Source lives in `src/`; extension service-worker and content-script files live in `public/` so Vite copies them without transformation.
