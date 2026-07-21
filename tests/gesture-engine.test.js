@@ -154,6 +154,46 @@ describe("GestureEngine", () => {
     expect(result.active).toBe(false);
     expect(result.events).toContainEqual({ type: "CONTROL_STOPPED" });
   });
+
+  it("recognizes a fist when one finger landmark is noisy", () => {
+    const engine = activeEngine();
+    engine.update(noisyClosedFist(), 600);
+    const result = engine.update(noisyClosedFist(), 1101);
+
+    expect(result.active).toBe(false);
+    expect(result.events).toContainEqual({ type: "CONTROL_STOPPED" });
+  });
+
+  it("keeps the fist hold through a brief tracking dropout", () => {
+    const engine = activeEngine();
+    engine.update(closedFist(), 600);
+    engine.update(openHand(), 650);
+    engine.update(closedFist(), 700);
+    const result = engine.update(closedFist(), 1101);
+
+    expect(result.active).toBe(false);
+    expect(result.events).toContainEqual({ type: "CONTROL_STOPPED" });
+  });
+
+  it("resets the fist hold after a sustained dropout", () => {
+    const engine = activeEngine();
+    engine.update(closedFist(), 600);
+    engine.update(openHand(), 721);
+    engine.update(closedFist(), 800);
+    const result = engine.update(closedFist(), 1200);
+
+    expect(result.active).toBe(true);
+    expect(result.events).not.toContainEqual({ type: "CONTROL_STOPPED" });
+  });
+
+  it("does not stop for a fist with an extended index finger", () => {
+    const engine = activeEngine();
+    engine.update(partialFist(), 600);
+    const result = engine.update(partialFist(), 1200);
+
+    expect(result.active).toBe(true);
+    expect(result.events).not.toContainEqual({ type: "CONTROL_STOPPED" });
+  });
 });
 
 describe("deriveCalibration", () => {
@@ -191,6 +231,17 @@ function openHand() {
 
 function closedFist() {
   return makeHand([false, false, false, false]);
+}
+
+function noisyClosedFist() {
+  const points = closedFist();
+  points[7] = { x: 0.5, y: 0.473, z: 0 };
+  points[8] = { x: 0.5, y: 0.6, z: 0 };
+  return points;
+}
+
+function partialFist() {
+  return makeHand([true, false, false, false]);
 }
 
 function thumbsUp() {

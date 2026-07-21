@@ -15,6 +15,7 @@ export class GestureEngine {
     this.options = {
       startHoldMs: 500,
       stopHoldMs: 500,
+      poseGraceMs: 120,
       browserBackHoldMs: 300,
       pinchHoldMs: 70,
       pinchReleaseMs: 55,
@@ -27,6 +28,7 @@ export class GestureEngine {
     this.poseCandidate = null;
     this.poseSince = 0;
     this.poseLatched = null;
+    this.poseLastSeenAt = 0;
     this.previousFingerY = null;
     this.lastScrollDirection = null;
     this.lastScrollAt = null;
@@ -66,7 +68,7 @@ export class GestureEngine {
     const indexAndMiddleDeployed = isPinchFingerDeployed(metrics[0]) && isPinchFingerDeployed(metrics[1]);
     const ringAndPinkyFolded = isFolded(metrics[2]) && isFolded(metrics[3]);
     const pinchPose = indexAndMiddleDeployed && ringAndPinkyFolded;
-    const closedFist = metrics.every(isStronglyCurled) && !pinchPose && !thumbsUp;
+    const closedFist = isClosedFist(landmarks, metrics);
     const browserBackPose = isBrowserBackPose(landmarks, metrics);
     const twoFingerPose = fingers[0] && fingers[1] && !fingers[2] && !fingers[3];
     const pinchRatio = getPinchRatio(landmarks);
@@ -88,7 +90,7 @@ export class GestureEngine {
         events.push({ type: "BROWSER_BACK" });
       }
     } else {
-      this.resetPoseState();
+      this.releasePose(now);
     }
 
     if (!this.active) {
@@ -142,12 +144,23 @@ export class GestureEngine {
       this.poseCandidate = name;
       this.poseSince = now;
       this.poseLatched = null;
+      this.poseLastSeenAt = now;
       return false;
     }
 
+    this.poseLastSeenAt = now;
     if (this.poseLatched === name || now - this.poseSince < durationMs) return false;
     this.poseLatched = name;
     return true;
+  }
+
+  releasePose(now) {
+    if (
+      this.poseCandidate !== null
+      && now - this.poseLastSeenAt > this.options.poseGraceMs
+    ) {
+      this.resetPoseState();
+    }
   }
 
   updatePinchState(pinchRatio, now, events) {
@@ -224,6 +237,7 @@ export class GestureEngine {
     this.poseCandidate = null;
     this.poseSince = 0;
     this.poseLatched = null;
+    this.poseLastSeenAt = 0;
   }
 
   result(pose, pinchRatio, events) {
@@ -270,16 +284,28 @@ export function isThumbsUp(landmarks, fingerMetrics = null) {
   if (!Array.isArray(landmarks) || landmarks.length < 21) return false;
 
   const metrics = fingerMetrics ?? getFingerMetrics(landmarks);
-  if (!metrics.every(isStronglyCurled)) return false;
+  if (metrics.some(isExtended) || metrics.filter(isCurled).length < 3) return false;
 
   return hasRaisedThumb(landmarks);
+}
+
+export function isClosedFist(landmarks, fingerMetrics = null) {
+  if (!Array.isArray(landmarks) || landmarks.length < 21) return false;
+
+  const metrics = fingerMetrics ?? getFingerMetrics(landmarks);
+  const pinchFingersDeployed = isPinchFingerDeployed(metrics[0])
+    && isPinchFingerDeployed(metrics[1]);
+  if (pinchFingersDeployed || metrics.some(isExtended) || hasRaisedThumb(landmarks)) return false;
+
+  return metrics.filter(isCurled).length >= 3
+    && metrics.filter(isStronglyCurled).length >= 2;
 }
 
 export function isBrowserBackPose(landmarks, fingerMetrics = null) {
   if (!Array.isArray(landmarks) || landmarks.length < 21) return false;
 
   const metrics = fingerMetrics ?? getFingerMetrics(landmarks);
-  if (!isExtended(metrics[0]) || !metrics.slice(1).every(isStronglyCurled)) return false;
+  if (!isExtended(metrics[0]) || !metrics.slice(1).every(isCurled)) return false;
   if (!hasRaisedThumb(landmarks)) return false;
 
   const indexMcp = landmarks[5];
@@ -349,6 +375,15 @@ function isFolded(metric) {
 
 function isStronglyCurled(metric) {
   return metric.pipAngle <= 122 && metric.straightness <= 0.76 && metric.wristReach <= 1.06;
+}
+
+function isCurled(metric) {
+  const curledSignals = [
+    metric.pipAngle <= 140,
+    metric.straightness <= 0.82,
+    metric.wristReach <= 1.1,
+  ];
+  return curledSignals.filter(Boolean).length >= 2;
 }
 
 function clamp(value, min, max) {
