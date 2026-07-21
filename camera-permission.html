@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Allow camera | Comfort Gesture Control</title>
+    <script type="module" src="/src/camera-permission.js"></script>
+  </head>
+  <body>
+    <main class="permission-shell">
+      <section class="permission-card">
+        <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+        <p class="eyebrow">COMFORT GESTURE CONTROL</p>
+        <h1>Allow camera access</h1>
+        <p class="intro">Comfort processes camera frames locally to recognize hand gestures. Video is not uploaded or stored.</p>
+
+        <div class="preview-frame">
+          <video id="permission-preview" autoplay muted playsinline></video>
+          <div id="preview-placeholder">Camera preview will appear here</div>
+        </div>
+
+        <div id="permission-status" class="status" data-kind="info" role="status" aria-live="polite">
+          Click the button below and choose Allow in the browser prompt.
+        </div>
+
+        <button id="allow-camera" class="primary-button" type="button">Allow camera</button>
+        <button id="close-page" class="secondary-button" type="button" hidden>Return to Comfort</button>
+
+        <div class="help">
+          <strong>If the prompt does not appear</strong>
+          <ol>
+            <li>Click the camera icon at the right end of the address bar.</li>
+            <li>Choose the option that allows camera access.</li>
+            <li>Click <em>Allow camera</em> again.</li>
+          </ol>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>
